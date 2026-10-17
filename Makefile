@@ -15,7 +15,9 @@ RENDERED := build/02_load.rendered.sql
 .DEFAULT_GOAL := help
 
 .PHONY: help bootstrap keypair check-env doctor download build setup load views \
-        verify pipeline sql query teardown clean-stage clean
+        verify pipeline users app sql query teardown clean-stage clean
+
+PORT ?= 8501
 
 help: ## Show available targets
 	@echo "Usage: make <target>"
@@ -35,7 +37,11 @@ help: ## Show available targets
 	@echo "    verify       Assert counts and referential integrity"
 	@echo "    pipeline     download -> build -> setup -> load -> views -> verify"
 	@echo
-	@echo "  3. Utilities"
+	@echo "  3. Application"
+	@echo "    users        Create the three demo logins, write credentials.txt"
+	@echo "    app          Run the Streamlit search UI (PORT=8501)"
+	@echo
+	@echo "  4. Utilities"
 	@echo "    sql          Run a SQL file:  make sql FILE=sql/00_setup.sql"
 	@echo "    query        Run inline SQL:  make query Q='select 1'"
 	@echo "    clean-stage  Remove uploaded files from @CUAD_LOAD"
@@ -88,7 +94,16 @@ pipeline: ## Run the whole corpus load end to end
 	@$(MAKE) --no-print-directory views
 	@$(MAKE) --no-print-directory verify
 
-# --- 3. Utilities ------------------------------------------------------------
+# --- 3. Application ----------------------------------------------------------
+
+users: ## Create the three demo logins (FORCE=1 to rotate passwords)
+	@$(MAKE) --no-print-directory sql FILE=sql/04_users.sql
+	$(PY) scripts/create_users.py $(if $(FORCE),--force,)
+
+app: ## Run the Streamlit search UI
+	$(PY) -m streamlit run app/streamlit_app.py --server.port $(PORT)
+
+# --- 4. Utilities ------------------------------------------------------------
 
 sql: ## Run a SQL file through the snow CLI
 	@test -n "$(FILE)" || { echo "usage: make sql FILE=sql/00_setup.sql"; exit 1; }
