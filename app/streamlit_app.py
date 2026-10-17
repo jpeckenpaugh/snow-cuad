@@ -1,6 +1,18 @@
-"""CUAD POC: lawyer-facing contract search over CUAD_DB.CORPUS.
+"""CUAD POC: browse the corpus by clause, type, jurisdiction and counterparty.
 
 Run with: make app
+
+Navigation lives in the URL. Four index pages (Contracts, Clauses, Types,
+Parties) all drill into the same filtered register, and every contract has a
+detail page with related documents.
+
+`rev` in the query string is a counter bumped on real navigation: facet
+widgets key off it so they re-initialise from the URL when you arrive from an
+index page, but keep their state while you are using them.
+
+Raw HTML is emitted with st.html, never st.markdown: contract text contains
+blank lines, and those terminate Markdown's HTML block, which would dump the
+rest of the snippet as literal tags.
 """
 from __future__ import annotations
 
@@ -12,13 +24,13 @@ import re
 import streamlit as st
 
 import db
+import queries
 
-st.set_page_config(page_title="CUAD Contract Review", page_icon="§", layout="wide")
+st.set_page_config(page_title="CUAD Corpus", page_icon="§", layout="wide")
 
-MAX_RENDER = 200_000   # chars of contract text rendered inline
-CONTEXT = 260          # chars of context around a clause span
-MAX_CLAUSE_HITS = 100
-MAX_DOC_HITS = 40
+MAX_RENDER = 200_000
+CONTEXT = 260
+ANY = "Any"
 
 CSS = """
 <style>
@@ -35,18 +47,69 @@ CSS = """
 }
 .doc .clause { background: rgba(255, 196, 0, 0.35); border-bottom: 1px solid rgba(255,196,0,0.9); }
 .doc .term   { background: rgba(0, 200, 120, 0.35); font-weight: 600; }
-.snippet { font-size: 0.82rem; line-height: 1.5; }
+.snippet { font-size: 0.84rem; line-height: 1.5; }
 .snippet .clause { background: rgba(255, 196, 0, 0.35); }
 .snippet .term   { background: rgba(0, 200, 120, 0.35); font-weight: 600; }
+.chip {
+  display: inline-block; padding: 2px 8px; margin: 2px 4px 2px 0;
+  border-radius: 10px; background: rgba(128,128,128,0.16);
+  font-size: 0.72rem; color: inherit;
+}
 .small { color: rgba(128,128,128,1); font-size: 0.75rem; }
 </style>
 """
 
 
-# --- helpers -----------------------------------------------------------------
+# --- URL state ---------------------------------------------------------------
 
-def highlight(text: str, term: str) -> str:
-    """Escape text and wrap case-insensitive occurrences of term in <mark>."""
+def param(name: str, default: str | None = None) -> str | None:
+    value = st.query_params.get(name)
+    return value if value not in (None, "") else default
+
+
+def param_list(name: str) -> list[str]:
+    raw = st.query_params.get(name)
+    return [part for part in raw.split(",") if part] if raw else []
+
+
+def rev() -> str:
+    return st.query_params.get("rev") or "0"
+
+
+def _write(current: dict) -> None:
+    st.query_params.clear()
+    for key, value in current.items():
+        if value not in (None, ""):
+            st.query_params[key] = value
+
+
+def _apply(current: dict, changes: dict) -> None:
+    for key, value in changes.items():
+        if value in (None, "", []):
+            current.pop(key, None)
+        else:
+            current[key] = value
+
+
+def nav(**changes) -> None:
+    """Real navigation: apply changes and bump rev so facet widgets re-init."""
+    current = dict(st.query_params)
+    _apply(current, changes)
+    current["rev"] = str(int(current.get("rev", "0")) + 1)
+    _write(current)
+    st.rerun()
+
+
+def nav_soft(**changes) -> None:
+    """Facet change from a widget: update the URL without resetting widgets."""
+    current = dict(st.query_params)
+    _apply(current, changes)
+    _write(current)
+
+
+# --- rendering helpers -------------------------------------------------------
+
+def highlight(text: str, term: str | None) -> str:
     if not term:
         return html.escape(text)
     pattern = re.compile(re.escape(term), re.IGNORECASE)
@@ -59,16 +122,16 @@ def highlight(text: str, term: str) -> str:
     return "".join(out)
 
 
-def annotate(text: str, spans: list[tuple[int, int]], term: str) -> str:
-    """Render text with clause spans and search hits marked.
-
-    Overlapping marks are dropped rather than nested: the first span wins.
-    """
-    marks: list[tuple[int, int, str]] = [(s, e, "clause") for s, e in spans if 0 <= s < e <= len(text)]
+def annotate(text: str, spans: list[tuple[int, int]], term: str | None) -> str:
+    marks: list[tuple[int, int, str]] = [
+        (s, e, "clause") for s, e in spans if 0 <= s < e <= len(text)
+    ]
     if term:
-        marks += [(m.start(), m.end(), "term") for m in re.finditer(re.escape(term), text, re.IGNORECASE)]
+        marks += [
+            (m.start(), m.end(), "term")
+            for m in re.finditer(re.escape(term), text, re.IGNORECASE)
+        ]
     marks.sort(key=lambda m: (m[0], m[1]))
-
     out, pos = [], 0
     for start, end, kind in marks:
         if start < pos:
@@ -79,6 +142,19 @@ def annotate(text: str, spans: list[tuple[int, int]], term: str) -> str:
     out.append(html.escape(text[pos:]))
     return "".join(out)
 
+
+def chips(labels: list[str]) -> None:
+    if labels:
+        st.html(
+            "".join(f'<span class="chip">{html.escape(str(label))}</span>' for label in labels)
+        )
+
+
+def small_line(label: str, value: str) -> str:
+    return f'<span class="small">{html.escape(label)}</span><br>{value}'
+
+
+# --- auth --------------------------------------------------------------------
 
 def check_login(username: str, password: str) -> dict | None:
     try:
@@ -99,18 +175,16 @@ def check_login(username: str, password: str) -> dict | None:
     return None
 
 
-# --- screens -----------------------------------------------------------------
-
 def login_screen() -> None:
-    st.markdown(CSS, unsafe_allow_html=True)
-    left, mid, right = st.columns([1, 1.1, 1])
+    st.html(CSS)
+    _, mid, _ = st.columns([1, 1.1, 1])
     with mid:
         st.markdown("## CUAD Contract Review")
         st.caption("510 commercial contracts · 41 clause categories · demo corpus")
         with st.form("login"):
             username = st.text_input("Username", placeholder="lawyer-001")
             password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+            submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
         if submitted:
             user = check_login(username.strip(), password)
             if user:
@@ -118,227 +192,372 @@ def login_screen() -> None:
                 st.rerun()
             else:
                 st.error("Invalid username or password.")
-        st.markdown(
+        st.html(
             '<p class="small">Demo logins are in <code>credentials.txt</code>, '
-            "written by <code>make users</code>.</p>",
-            unsafe_allow_html=True,
+            "written by <code>make users</code>.</p>"
         )
 
 
-def sidebar() -> tuple[str, list[str]]:
+# --- sidebar -----------------------------------------------------------------
+
+NAV = [
+    ("contracts", "Contracts"),
+    ("clauses", "Clauses"),
+    ("types", "Types"),
+    ("parties", "Parties"),
+]
+
+
+def sidebar(page: str, term: str | None) -> None:
     user = st.session_state.user
     with st.sidebar:
         st.markdown(f"**{user['display_name']}**")
         st.caption(f"`{user['username']}`")
-        if st.button("Sign out", use_container_width=True):
+        if st.button("Sign out", width="stretch"):
             st.session_state.clear()
+            st.query_params.clear()
             st.rerun()
+
         st.divider()
-        term = st.text_input(
-            "Search clause text",
-            key="term",
-            placeholder="e.g. governing law, indemnif",
-            help="Case-insensitive substring match over clause answers.",
-        ).strip()
-        selected = st.multiselect("Clause categories", options=db.categories())
-        st.caption("Leave the box empty to browse the document register.")
+        with st.form("search", clear_on_submit=False):
+            typed = st.text_input("Search", value=term or "", placeholder="title, counterparty, clause")
+            if st.form_submit_button("Search", width="stretch"):
+                nav(nav="contracts", q=typed.strip() or None, doc=None)
+
         st.divider()
-        st.caption(f"{len(db.categories())} categories · XS warehouse")
-    return term, selected
+        st.html('<span class="small">BROWSE</span>')
+        for key, label in NAV:
+            if st.button(
+                label,
+                key=f"nav-{key}",
+                width="stretch",
+                type="primary" if key == page else "secondary",
+            ):
+                nav(nav=key, doc=None)
 
 
-def render_register(term: str) -> None:
-    st.subheader("Document register")
-    st.caption("Pick a contract, or search for a term in the sidebar.")
-    rows = db.q(
-        """
-        SELECT DOC_ID, TITLE, PARTIES, AGREEMENT_DATE, GOVERNING_LAW, CHAR_LEN
-        FROM V_CONTRACT_METADATA
-        ORDER BY TITLE
-        LIMIT 200
-        """
+def facet_controls(selected_clauses, doc_type, jurisdiction, decade, party) -> None:
+    stamp = rev()
+    with st.sidebar:
+        st.divider()
+        st.html('<span class="small">FILTER</span>')
+
+        key = f"f-clause-{stamp}"
+        st.multiselect(
+            "Clause categories (all must be present)",
+            options=[row[0] for row in queries.category_index()],
+            default=selected_clauses,
+            key=key,
+            on_change=lambda k=key: nav_soft(clause=",".join(st.session_state[k]) or None),
+        )
+
+        types = [ANY] + [row[0] for row in queries.facet_types()]
+        key = f"f-type-{stamp}"
+        st.selectbox(
+            "Agreement type",
+            types,
+            index=types.index(doc_type) if doc_type in types else 0,
+            key=key,
+            on_change=lambda k=key: nav_soft(
+                type=None if st.session_state[k] == ANY else st.session_state[k]
+            ),
+        )
+
+        jurisdictions = [ANY] + [row[0] for row in queries.facet_jurisdictions()]
+        key = f"f-jur-{stamp}"
+        st.selectbox(
+            "Jurisdiction",
+            jurisdictions,
+            index=jurisdictions.index(jurisdiction) if jurisdiction in jurisdictions else 0,
+            key=key,
+            on_change=lambda k=key: nav_soft(
+                jur=None if st.session_state[k] == ANY else st.session_state[k]
+            ),
+        )
+
+        decades = [ANY] + [row[0] for row in queries.facet_decades()]
+        key = f"f-decade-{stamp}"
+        st.selectbox(
+            "Agreement decade",
+            decades,
+            index=decades.index(decade) if decade in decades else 0,
+            key=key,
+            on_change=lambda k=key: nav_soft(
+                decade=None if st.session_state[k] == ANY else st.session_state[k]
+            ),
+        )
+
+        key = f"f-party-{stamp}"
+        st.text_input(
+            "Counterparty contains",
+            value=party or "",
+            key=key,
+            on_change=lambda k=key: nav_soft(party=st.session_state[k].strip() or None),
+        )
+
+        if any([selected_clauses, doc_type, jurisdiction, decade, party]):
+            if st.button("Clear filters", width="stretch"):
+                nav(clause=None, type=None, jur=None, decade=None, party=None)
+
+
+# --- pages -------------------------------------------------------------------
+
+def page_contracts() -> None:
+    term = param("q")
+    selected_clauses = param_list("clause")
+    doc_type, jurisdiction, decade, party = (
+        param("type"), param("jur"), param("decade"), param("party")
     )
-    for doc_id, title, parties, date, law, char_len in rows:
-        with st.container(border=True):
-            cols = st.columns([4, 2, 1])
-            cols[0].markdown(f"**{highlight(title, term)}**", unsafe_allow_html=True)
-            cols[0].markdown(
-                f'<span class="small">{highlight((parties or "parties not stated")[:120], term)}</span>',
-                unsafe_allow_html=True,
-            )
-            cols[1].markdown(
-                f'<span class="small">{date or "no date"} · {law or "law not stated"}</span>',
-                unsafe_allow_html=True,
-            )
-            if cols[2].button("Open", key=f"open-reg-{doc_id}", use_container_width=True):
-                st.session_state.doc_id = doc_id
-                st.rerun()
-    st.caption("Showing the first 200 of 510 contracts.")
+    facet_controls(selected_clauses, doc_type, jurisdiction, decade, party)
 
-
-def render_results(term: str, selected: list[str]) -> None:
-    like = f"%{term}%"
-
-    where = "cl.ANSWER_TEXT ILIKE %s"
-    params: list = [like]
-    if selected:
-        where += f" AND cl.CATEGORY IN ({','.join(['%s'] * len(selected))})"
-        params += selected
-    clause_hits = db.q(
-        f"""
-        SELECT cl.CLAUSE_ID, cl.DOC_ID, c.TITLE, cl.CATEGORY, cl.ANSWER_TEXT
-        FROM CLAUSES cl
-        JOIN CONTRACTS c ON c.DOC_ID = cl.DOC_ID
-        WHERE {where}
-        ORDER BY c.TITLE, cl.ANSWER_START
-        LIMIT {MAX_CLAUSE_HITS}
-        """,
-        tuple(params),
+    rows = queries.browse(
+        clauses=selected_clauses,
+        doc_type=doc_type,
+        jurisdiction=jurisdiction,
+        decade=decade,
+        party=party,
+        term=term,
     )
 
-    doc_hits = db.q(
-        f"""
-        SELECT c.DOC_ID, c.TITLE, c.CHAR_LEN
-        FROM CONTRACT_TEXT t
-        JOIN CONTRACTS c ON c.DOC_ID = t.DOC_ID
-        WHERE t.FULL_TEXT ILIKE %s
-        ORDER BY c.TITLE
-        LIMIT {MAX_DOC_HITS}
-        """,
-        (like,),
+    st.subheader(f"{len(rows)} contracts")
+    active = [f"clause: {c}" for c in selected_clauses]
+    active += [f"type: {doc_type}"] if doc_type else []
+    active += [f"jurisdiction: {jurisdiction}"] if jurisdiction else []
+    active += [f"decade: {decade}"] if decade else []
+    active += [f"counterparty: {party}"] if party else []
+    active += [f"search: {term}"] if term else []
+    chips(active)
+
+    if not rows:
+        st.info("Nothing matches those filters.")
+        return
+
+    table = [
+        {
+            "Title": row[1],
+            "Type": row[2],
+            "Year": str(row[3]) if row[3] is not None else "—",
+            "Jurisdiction": row[4],
+            "Counterparties": (row[5] or "")[:90],
+            "Clauses": f"{row[6]}/41",
+        }
+        for row in rows
+    ]
+    ids = [row[0] for row in rows]
+
+    event = st.dataframe(
+        table,
+        hide_index=True,
+        height=520,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="tbl-contracts",
+        column_config={
+            "Title": st.column_config.TextColumn(width=280),
+            "Type": st.column_config.TextColumn(width=170),
+            "Year": st.column_config.TextColumn(width=60),
+            "Jurisdiction": st.column_config.TextColumn(width=120),
+            "Counterparties": st.column_config.TextColumn(width=170),
+            "Clauses": st.column_config.TextColumn(width=70),
+        },
     )
+    if event.selection.rows:
+        nav(doc=ids[event.selection.rows[0]], nav="document")
 
-    st.subheader(f"Results for “{term}”")
-    left, right = st.columns(2)
-    left.metric("Clause matches", len(clause_hits))
-    right.metric("Contracts containing the term", len(doc_hits))
-
-    if clause_hits:
-        st.markdown("#### Clause matches")
-        for clause_id, doc_id, title, category, answer in clause_hits:
+    if term:
+        st.divider()
+        st.markdown(f"#### Clause text matches for “{term}”")
+        hits = queries.clause_matches(term, selected_clauses or None)
+        if not hits:
+            st.caption("No clause answers contain that term.")
+        for doc_id, title, category, answer in hits:
             with st.container(border=True):
-                head = st.columns([4, 2, 1])
-                head[0].markdown(f"**{highlight(title, term)}**", unsafe_allow_html=True)
-                head[1].markdown(f'<span class="small">{category}</span>', unsafe_allow_html=True)
-                if head[2].button("Open", key=f"open-cl-{clause_id}", use_container_width=True):
-                    st.session_state.doc_id = doc_id
-                    st.rerun()
-                st.markdown(
-                    f'<div class="snippet">{highlight(answer, term)}</div>',
-                    unsafe_allow_html=True,
-                )
-        if len(clause_hits) == MAX_CLAUSE_HITS:
-            st.caption(f"Capped at {MAX_CLAUSE_HITS} clause matches.")
-    else:
-        st.info("No clause answers matched. The term may still appear in contract bodies.")
-
-    if doc_hits:
-        st.markdown("#### Contracts containing the term")
-        for doc_id, title, char_len in doc_hits:
-            cols = st.columns([5, 1, 1])
-            cols[0].markdown(f"{highlight(title, term)}", unsafe_allow_html=True)
-            cols[1].markdown(f'<span class="small">{char_len:,} chars</span>', unsafe_allow_html=True)
-            if cols[2].button("Open", key=f"open-doc-{doc_id}", use_container_width=True):
-                st.session_state.doc_id = doc_id
-                st.rerun()
+                cols = st.columns([5, 1])
+                cols[0].markdown(f"**{title}**")
+                cols[0].html(f'<span class="small">{html.escape(category)}</span>')
+                if cols[1].button("Open", key=f"hit-{doc_id}-{category}", width="stretch"):
+                    nav(doc=doc_id, nav="document")
+                st.html(f'<div class="snippet">{highlight(answer, term)}</div>')
 
 
-def render_document(doc_id: str, term: str) -> None:
-    if st.button("← Back to results"):
-        st.session_state.pop("doc_id", None)
-        st.rerun()
-
-    meta = db.q(
-        """
-        SELECT TITLE, PARTIES, AGREEMENT_DATE, EFFECTIVE_DATE, EXPIRATION_DATE,
-               RENEWAL_TERM, NOTICE_PERIOD_TO_TERMINATE_RENEWAL, GOVERNING_LAW, CHAR_LEN
-        FROM V_CONTRACT_METADATA WHERE DOC_ID = %s
-        """,
-        (doc_id,),
+def page_clauses() -> None:
+    index = queries.category_index()
+    st.subheader("Clause categories")
+    st.caption(
+        "How many of the 510 contracts contain each clause. Select a row to filter the register."
     )
+    table = [
+        {"Clause": row[0], "Contracts": row[1], "Spans": row[2], "Group": row[3],
+         "Description": row[4]}
+        for row in index
+    ]
+    event = st.dataframe(
+        table,
+        width="stretch",
+        hide_index=True,
+        height=620,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="tbl-clauses",
+        column_config={
+            "Clause": st.column_config.TextColumn(width=250),
+            "Contracts": st.column_config.NumberColumn(width=90),
+            "Spans": st.column_config.NumberColumn(width=80),
+            "Group": st.column_config.TextColumn(width=70),
+            "Description": st.column_config.TextColumn(width=420),
+        },
+    )
+    if event.selection.rows:
+        nav(nav="contracts", clause=index[event.selection.rows[0]][0])
+
+
+def page_types() -> None:
+    index = queries.type_index()
+    typed = sum(row[1] for row in index)
+    st.subheader("Agreement types")
+    st.caption(
+        f"{len(index)} distinct types across {typed} contracts. Types come from the "
+        "annotated contract name, so the tail is long; 'Unclassified' means no type "
+        "could be parsed. Select a row to filter the register."
+    )
+    table = [{"Agreement type": row[0], "Contracts": row[1]} for row in index]
+    event = st.dataframe(
+        table,
+        width="stretch",
+        hide_index=True,
+        height=620,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="tbl-types",
+        column_config={
+            "Agreement type": st.column_config.TextColumn(width=340),
+            "Contracts": st.column_config.NumberColumn(width=100),
+        },
+    )
+    if event.selection.rows:
+        nav(nav="contracts", type=index[event.selection.rows[0]][0])
+
+
+def page_parties() -> None:
+    index = queries.party_index(min_docs=2)
+    singletons = queries.party_singletons()
+    st.subheader("Counterparties")
+    st.caption(
+        f"Only the {len(index)} names appearing in more than one contract are listed. "
+        f"The other {singletons} occur once: CUAD's party field is free text that mixes "
+        "entity names with role labels ('Licensor', 'Party A'). Use the counterparty "
+        "filter on Contracts to search all of them. Select a row to filter the register."
+    )
+    table = [{"Counterparty": row[0], "Contracts": row[1]} for row in index]
+    event = st.dataframe(
+        table,
+        width="stretch",
+        hide_index=True,
+        height=620,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="tbl-parties",
+        column_config={
+            "Counterparty": st.column_config.TextColumn(width=340),
+            "Contracts": st.column_config.NumberColumn(width=100),
+        },
+    )
+    if event.selection.rows:
+        nav(nav="contracts", party=index[event.selection.rows[0]][0])
+
+
+def page_document() -> None:
+    doc_id = param("doc")
+    if not doc_id:
+        st.info("No document selected.")
+        return
+    term = param("q")
+    meta = queries.document(doc_id)
     if not meta:
         st.error(f"No such contract: {doc_id}")
         return
-    (title, parties, agreement_date, effective_date, expiration_date,
-     renewal_term, notice_period, governing_law, char_len) = meta[0]
 
-    st.subheader(title)
-    st.markdown(
-        f'<span class="small">{char_len:,} characters · doc_id <code>{doc_id}</code></span>',
-        unsafe_allow_html=True,
+    if st.button("← Back to contracts"):
+        nav(nav="contracts", doc=None)
+
+    st.subheader(meta["title"])
+    st.html(
+        f'<span class="small">{meta["char_len"]:,} characters · '
+        f'doc_id <code>{html.escape(doc_id)}</code></span>'
     )
 
-    fields = [
-        ("Parties", parties),
-        ("Agreement date", agreement_date),
-        ("Effective date", effective_date),
-        ("Expiration date", expiration_date),
-        ("Renewal term", renewal_term),
-        ("Notice period", notice_period),
-        ("Governing law", governing_law),
+    derived = [
+        ("Type", html.escape(str(meta["doc_type"]))),
+        ("Agreement year", str(meta["agreement_year"] or "Not stated")),
+        ("Jurisdiction", html.escape(str(meta["jurisdiction"]))),
+        ("Clauses present", f'{meta["clause_count"]} of 41'),
     ]
-    for row_start in range(0, len(fields), 4):
-        cols = st.columns(4)
-        for col, (label, value) in zip(cols, fields[row_start:row_start + 4]):
-            col.markdown(
-                f'<span class="small">{label}</span><br>{highlight(value or "not stated", term)}',
-                unsafe_allow_html=True,
-            )
+    cols = st.columns(4)
+    for col, (label, value) in zip(cols, derived):
+        col.html(small_line(label, value))
+    st.html(small_line("Counterparties", html.escape(meta["parties"] or "none parsed")))
 
-    clauses = db.q(
-        """
-        SELECT CATEGORY, ANSWER_TEXT, ANSWER_START, ANSWER_END
-        FROM CLAUSES WHERE DOC_ID = %s ORDER BY ANSWER_START, ANSWER_END
-        """,
-        (doc_id,),
-    )
-    status = db.q(
-        """
-        SELECT CATEGORY, GRP, FOUND, SPAN_COUNT
-        FROM V_CONTRACT_CATEGORY_STATUS WHERE DOC_ID = %s
-        ORDER BY GRP, CATEGORY
-        """,
-        (doc_id,),
-    )
-    text_rows = db.q("SELECT FULL_TEXT FROM CONTRACT_TEXT WHERE DOC_ID = %s", (doc_id,))
-    full_text = text_rows[0][0] if text_rows else ""
+    clauses = queries.document_clauses(doc_id)
+    status = queries.document_category_status(doc_id)
+    full_text = queries.document_text(doc_id)
 
     found = sum(1 for row in status if row[2])
     if status:
-        st.progress(found / len(status), text=f"{found} of {len(status)} clause categories present in this contract")
+        st.progress(found / len(status), text=f"{found} of {len(status)} clause categories present")
 
-    tab_clauses, tab_checklist, tab_text = st.tabs(["Matched clauses", "Category checklist", "Full text"])
+    tab_clauses, tab_checklist, tab_text = st.tabs(["Clauses", "Checklist", "Full text"])
 
     with tab_clauses:
         if not clauses:
-            st.info("No clause answers recorded for this contract.")
-        for category, answer, start, end in clauses:
+            st.info("No clause answers recorded.")
+        for category, _answer, start, end, _question in clauses:
             begin = max(0, start - CONTEXT)
             snippet = full_text[begin:end + CONTEXT]
             body = annotate(snippet, [(start - begin, end - begin)], term)
-            st.markdown(f"**{category}**", unsafe_allow_html=True)
-            st.markdown(f'<div class="snippet">…{body}…</div>', unsafe_allow_html=True)
+            st.markdown(f"**{category}**")
+            st.html(f'<div class="snippet">…{body}…</div>')
 
     with tab_checklist:
-        for category, grp, is_found, span_count in status:
+        lines = []
+        for category, _group, is_found, span_count in status:
             mark = "✔" if is_found else "·"
             detail = f"{span_count} span(s)" if is_found else "not present"
-            st.markdown(f"{mark} &nbsp; **{category}** &nbsp; <span class='small'>{detail}</span>",
-                        unsafe_allow_html=True)
+            lines.append(
+                f'<div>{mark} &nbsp; <b>{html.escape(category)}</b> &nbsp; '
+                f'<span class="small">{detail}</span></div>'
+            )
+        st.html("".join(lines))
 
     with tab_text:
-        spans = [(s, e) for _, _, s, e in clauses]
         shown = full_text[:MAX_RENDER]
-        st.markdown(CSS, unsafe_allow_html=True)
-        st.markdown(f'<div class="doc">{annotate(shown, spans, term)}</div>', unsafe_allow_html=True)
+        st.html(
+            f'<div class="doc">'
+            f'{annotate(shown, [(s, e) for _, _, s, e, _ in clauses], term)}</div>'
+        )
         if len(full_text) > MAX_RENDER:
             st.warning(f"Showing the first {MAX_RENDER:,} of {len(full_text):,} characters.")
-        st.download_button(
-            "Download full text",
-            data=full_text,
-            file_name=f"{doc_id}.txt",
-            mime="text/plain",
-        )
+        st.download_button("Download full text", data=full_text, file_name=f"{doc_id}.txt")
+
+    st.divider()
+    st.markdown("#### Related contracts")
+    st.caption(
+        "Ranked by shared counterparty, clause overlap, agreement type, jurisdiction and year."
+    )
+    rel = queries.related(doc_id)
+    if not rel:
+        st.caption("Nothing scored above the threshold for this contract.")
+    for rel_id, title, rel_type, rel_year, score, reasons in rel:
+        with st.container(border=True):
+            cols = st.columns([4, 1, 1])
+            cols[0].markdown(f"**{title}**")
+            cols[0].html(
+                f'<span class="small">{html.escape(str(rel_type))} · '
+                f'{rel_year or "year not stated"}</span>'
+            )
+            cols[1].html(f'<span class="small">score {score}</span>')
+            if cols[2].button("Open", key=f"rel-{rel_id}", width="stretch"):
+                nav(doc=rel_id, nav="document")
+            chips([part.strip() for part in reasons.split("|")])
 
 
 # --- main --------------------------------------------------------------------
@@ -348,19 +567,29 @@ def main() -> None:
         login_screen()
         return
 
-    term, selected = sidebar()
+    st.html(CSS)
+    page = param("nav", "contracts")
+    term = param("q")
 
-    if st.session_state.get("doc_id"):
-        render_document(st.session_state.doc_id, term)
-    elif term:
-        render_results(term, selected)
+    sidebar(page, term)
+
+    if page == "document":
+        page_document()
+    elif page == "clauses":
+        page_clauses()
+    elif page == "types":
+        page_types()
+    elif page == "parties":
+        page_parties()
     else:
-        render_register(term)
+        page_contracts()
 
     st.divider()
-    st.caption(
-        "Demo only. CUAD data (CC BY 4.0) from The Atticus Project; "
-        "not legal advice. Clause spans are expert annotations, not model output."
+    st.html(
+        '<span class="small">Demo only. Type, year, jurisdiction and counterparty are '
+        "parsed from CUAD's free-text clause answers; unparseable values are shown as "
+        "Unclassified or Not stated. CUAD data (CC BY 4.0) from The Atticus Project. "
+        "Not legal advice.</span>"
     )
 
 

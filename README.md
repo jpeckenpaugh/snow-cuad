@@ -9,7 +9,7 @@ See <https://www.atticusprojectai.org/cuad>.
 
 ## Current status
 
-**Step 3 of N complete: demo logins and the search UI.**
+**Step 4 of N complete: derived dimensions and a browsable UI.**
 
 - [x] Python 3.14 virtualenv
 - [x] Snowflake CLI + Python connector in `.venv`
@@ -19,6 +19,8 @@ See <https://www.atticusprojectai.org/cuad>.
 - [x] Snowflake objects + load + verification
 - [x] Demo users
 - [x] Streamlit app
+- [x] Derived dimensions (type, year, jurisdiction, counterparty)
+- [x] Browse by clause / type / jurisdiction / counterparty + related documents
 
 ---
 
@@ -133,11 +135,11 @@ Or step by step:
 | Command | Does | Expected |
 |---|---|---|
 | `make download` | Fetch `CUADv1.json` + `category_descriptions.csv` into `data/cuad/` | 510 contracts, 13,823 spans, 41 categories |
-| `make build` | Write `build/*.ndjson` + `manifest.json` | 510 / 510 / 13,823 / 41 rows |
-| `make setup` | Create `CUAD_WH`, `CUAD_DB.CORPUS`, tables, stage | objects created |
-| `make load` | `PUT` + `COPY INTO` the four tables | 4x `LOADED`, 0 errors |
-| `make views` | Create `V_CONTRACT_METADATA`, `V_CONTRACT_CATEGORY_STATUS` | views created |
-| `make verify` | Assert counts + referential integrity | `all checks passed` |
+| `make build` | Write the 8 NDJSON load files + both manifests | 510 / 510 / 13,823 / 41 and the dimensions |
+| `make setup` | Create `CUAD_WH`, `CUAD_DB.CORPUS`, 9 tables, stage | objects created |
+| `make load` | `PUT` + `COPY INTO` all eight data tables | 8x `LOADED`, 0 errors |
+| `make views` | Create the register, facet, clause index and related-doc views | 9 views created |
+| `make verify` | Assert counts, integrity and parse rates | `all checks passed` |
 
 `make download` and `make build` need no Snowflake access. `make verify`
 exits non-zero on any mismatch, so it works as a gate.
@@ -146,22 +148,33 @@ exits non-zero on any mismatch, so it works as a gate.
 
 ```
 CUAD_DB.CORPUS
+  -- as loaded ---------------------------------------------------------------
 ├── CONTRACTS                510  (DOC_ID, TITLE, CHAR_LEN)
 ├── CONTRACT_TEXT            510  (DOC_ID, FULL_TEXT)          -- whole-doc search
 ├── CLAUSES               13,823  one row per answer span
 │                                 (CLAUSE_ID, DOC_ID, CATEGORY, QUESTION,
 │                                  ANSWER_TEXT, ANSWER_START, ANSWER_END)
 ├── CLAUSE_CATEGORIES         41  (CATEGORY, DESCRIPTION, ANSWER_FORMAT, GRP)
-├── V_CONTRACT_METADATA      510  document register, pivoted from clause answers
-└── V_CONTRACT_CATEGORY_STATUS    every doc x category, FOUND + SPAN_COUNT
+├── APP_USERS                  3  demo logins (PBKDF2 hashes only)
+  -- derived by scripts/build_dimensions.py ----------------------------------
+├── CONTRACT_DIM             510  DOC_TYPE, AGREEMENT_YEAR, JURISDICTION, CLAUSE_COUNT
+├── CONTRACT_PARTY           915  parsed counterparties
+├── RELATED_DOC            2,430  top 5 related per contract, with reasons
+├── CATEGORY_STATS            41  DISTINCT documents per clause category
+  -- views -------------------------------------------------------------------
+├── V_CONTRACT_METADATA           document register pivoted from clause answers
+├── V_CONTRACT_CATEGORY_STATUS    every doc x category, FOUND + SPAN_COUNT
+├── V_CONTRACT_BROWSE             register + derived dimensions, one row per doc
+├── V_FACET_TYPE / _YEAR / _JURISDICTION / _PARTY    facet values with counts
+├── V_CATEGORY_INDEX              clause index: contracts per category
+└── V_RELATED_DOC                 related docs joined to title, type, year
 ```
 
-Two things worth knowing:
+Things worth knowing:
 
 - **There is no metadata column in CUAD.** Parties, dates and governing law
-  exist only as clause answers, so `V_CONTRACT_METADATA` pivots 8 documentary
-  categories out of `CLAUSES`. Coverage: parties 509/510, agreement date
-  470/510, governing law 437/510.
+  exist only as clause answers. Everything in the derived tables is *parsed*
+  out of free text, which is why parse rates matter (below).
 - **`CLAUSES` holds one row per answer span**, not per question. 20,910
   questions produce 13,823 spans; unanswered questions carry nothing to search.
 
@@ -238,30 +251,66 @@ Sign in with a username and the password from `credentials.txt`.
 
 ### What the UI does
 
-**Search** (sidebar box, case-insensitive substring over clause answers):
+Four index pages, all drilling into one filtered register, plus a document page.
+Navigation lives in the URL, so `?nav=contracts&clause=Source%20Code%20Escrow`
+is a working link (you sign in, then land on the filtered result).
 
-- clause matches — contract, category, the matched clause text, `Open`
-- contracts whose full text contains the term
-- optional filter by any of the 41 clause categories
+| Page | Shows | Selecting a row |
+|---|---|---|
+| **Contracts** | the register, with facets: clause categories, type, jurisdiction, decade, counterparty | opens the document |
+| **Clauses** | the 41 categories with distinct-document counts (13 → 510) | filters the register to that clause |
+| **Types** | agreement types with counts, long tail included | filters the register to that type |
+| **Parties** | counterparties appearing in ≥ 2 contracts | filters the register to that party |
 
-**Document view** (`Open` on any result):
+**Contract detail** shows type, year, jurisdiction, clause coverage
+(`13 of 41`), and three tabs: *Clauses* (each span with ~260 characters of
+context), *Checklist* (all 41 categories, present or not), and *Full text*
+(annotated, capped at 200,000 characters, downloadable).
 
-- metadata header: parties, agreement/effective/expiration dates, renewal
-  term, notice period, governing law
-- coverage bar: how many of the 41 categories are present in that contract
-- *Matched clauses* — each span with ~260 characters of surrounding context
-- *Category checklist* — every category marked present or not present
-- *Full text* — the whole contract with clause spans highlighted, plus a
-  download button; rendering is capped at 200,000 characters
+**Related contracts** at the bottom of each document, top 5, each with the
+reasons it scored:
 
-Search hits are highlighted in green, clause spans in amber. Contract text
-is HTML-escaped before rendering, and every query is parameterised.
+```
+score = 3 × shared counterparty
+      + 3 × Jaccard overlap of the 41-category signature
+      + 2 × same agreement type
+      + 1 × same jurisdiction
+      + 1 × agreement year within ±1        (minimum score 3)
+```
+
+Search hits highlight green, clause spans amber. All contract text is
+HTML-escaped, every query is parameterised, and raw HTML goes through
+`st.html` rather than `st.markdown` — contract text contains blank lines,
+and those end Markdown's HTML block, which would leak the rest of a snippet
+as literal tags.
+
+### Derived dimensions and their parse rates
+
+`scripts/build_dimensions.py` parses the free-text answers, and `make verify`
+reports the rates so a regression is visible:
+
+| Dimension | Parsed | Note |
+|---|---|---|
+| Agreement type | 500/510 (98%) | from the annotated contract name; 207 distinct types, top 20 cover 50% |
+| Agreement year | 450/510 (88%) | handles `June 21, 1999`, `9/21/98`, `14t h day of April, 2015` |
+| Jurisdiction | 404/510 (79%) | `State of New York` and `laws of England` both normalize to one value; the designation is stripped |
+
+Counterparty is the honest weak spot: 915 parsed names, of which only **29
+appear in more than one contract**. CUAD's party field is free text that mixes
+entity names with role labels (`Licensor`, `Party A`, `INDIVIDUALLY`), so a
+role stoplist gets the obvious ones and the rest is noise. That is why Parties
+lists only the ≥ 2 names and why counterparty contributes to just 71 of the
+2,430 related-document rows — related documents are driven by clause overlap
+and agreement type.
+
+Unparseable values are never dropped: they become `Unclassified` / `Not
+stated` and stay selectable facets.
 
 ### What it does not do
 
-No semantic search, no ranking, no summarisation, no PDF rendering (CUAD
-ships text, not PDFs), and no per-matter access control — all three lawyers
-see the whole corpus. Those are phase-2 decisions.
+No semantic or vector search, no relevance ranking, no summarisation, no PDF
+rendering (CUAD ships text, not PDFs), no clients or matters (CUAD has none),
+and no per-user access control — all three lawyers see the whole corpus.
 
 ---
 
@@ -278,10 +327,12 @@ Makefile              bootstrap / doctor / corpus / users / app
   config.toml         headless, no usage stats
 sql/
   00_setup.sql        warehouse, database, schema
-  01_tables.sql       tables, file format, stage
-  02_load.sql         PUT + COPY (rendered with the build path)
+  01_tables.sql       nine tables, file format, stage
+  02_load.sql         PUT + COPY for the corpus (rendered with the build path)
   03_views.sql        document register + category status
   04_users.sql        APP_USERS (app logins, not Snowflake users)
+  05_dimensions.sql   PUT + COPY for the derived dimensions
+  06_dimension_views.sql  register, facet, clause index and related-doc views
   99_teardown.sql     drop database and warehouse
 scripts/
   bootstrap.sh        venv + install + seed .env
@@ -289,11 +340,13 @@ scripts/
   envcheck.py         .env validation + connection test
   download_cuad.py    fetch CUAD artifacts
   build_load_files.py CUADv1.json -> NDJSON
-  verify_load.py      assert counts and integrity
+  build_dimensions.py clause text -> type, year, jurisdiction, counterparties, related
+  verify_load.py      assert counts, integrity and parse rates
   create_users.py     three demo logins + credentials.txt
   sf.py               shared connection helper
 app/
-  streamlit_app.py    login gate, search, document view
+  streamlit_app.py    login gate, four index pages, document view, related docs
+  queries.py          every query the UI runs
   db.py               cached connection + query helper
 data/cuad/             downloaded source (gitignored)
 build/                generated NDJSON + manifest (gitignored)

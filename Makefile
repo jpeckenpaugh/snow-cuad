@@ -11,6 +11,7 @@ SQL_ENV = set -a; source .env; set +a; \
           $(SNOW) sql -x
 
 RENDERED := build/02_load.rendered.sql
+RENDERED_DIM := build/05_dimensions.rendered.sql
 
 .DEFAULT_GOAL := help
 
@@ -32,8 +33,8 @@ help: ## Show available targets
 	@echo "    download     Fetch CUADv1.json + category_descriptions.csv"
 	@echo "    build        Build NDJSON load files and manifest"
 	@echo "    setup        Create warehouse, database, schema, tables, stage"
-	@echo "    load         Upload NDJSON and COPY INTO the four tables"
-	@echo "    views        Create V_CONTRACT_METADATA and category status view"
+	@echo "    load         Upload NDJSON and COPY INTO all eight tables"
+	@echo "    views        Create register, facet, clause index, related-doc views"
 	@echo "    verify       Assert counts and referential integrity"
 	@echo "    pipeline     download -> build -> setup -> load -> views -> verify"
 	@echo
@@ -67,21 +68,26 @@ doctor: ## Validate .env and connect to Snowflake
 download: ## Fetch CUAD artifacts into data/cuad
 	$(PY) scripts/download_cuad.py
 
-build: ## Build NDJSON load files
+build: ## Build NDJSON load files and navigation dimensions
 	$(PY) scripts/build_load_files.py
+	$(PY) scripts/build_dimensions.py
 
 setup: ## Create warehouse, database, schema, tables, stage
 	@$(MAKE) --no-print-directory sql FILE=sql/00_setup.sql
 	@$(MAKE) --no-print-directory sql FILE=sql/01_tables.sql
 
-load: ## Upload and COPY INTO the four tables
+load: ## Upload and COPY INTO all eight tables
 	@test -f build/manifest.json || { echo "error: build/manifest.json missing; run 'make build'"; exit 1; }
+	@test -f build/dimensions.json || { echo "error: build/dimensions.json missing; run 'make build'"; exit 1; }
 	@mkdir -p build
 	@sed 's|__BUILD_DIR__|$(CURDIR)/build|g' sql/02_load.sql > $(RENDERED)
 	@$(SQL_ENV) -f $(RENDERED)
+	@sed 's|__BUILD_DIR__|$(CURDIR)/build|g' sql/05_dimensions.sql > $(RENDERED_DIM)
+	@$(SQL_ENV) -f $(RENDERED_DIM)
 
-views: ## Create the document register and category status views
+views: ## Create the register, facet, clause index and related-doc views
 	@$(MAKE) --no-print-directory sql FILE=sql/03_views.sql
+	@$(MAKE) --no-print-directory sql FILE=sql/06_dimension_views.sql
 
 verify: ## Assert row counts and referential integrity
 	$(PY) scripts/verify_load.py

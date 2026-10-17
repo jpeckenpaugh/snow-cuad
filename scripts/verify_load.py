@@ -27,6 +27,14 @@ TABLES_SQL = {
     "categories": "SELECT COUNT(*) FROM CLAUSE_CATEGORIES",
 }
 
+DIM_TABLES = ["contract_dim", "contract_party", "related_doc", "category_stats"]
+DIM_SQL = {
+    "contract_dim": "SELECT COUNT(*) FROM CONTRACT_DIM",
+    "contract_party": "SELECT COUNT(*) FROM CONTRACT_PARTY",
+    "related_doc": "SELECT COUNT(*) FROM RELATED_DOC",
+    "category_stats": "SELECT COUNT(*) FROM CATEGORY_STATS",
+}
+
 CHECKS = [
     (
         "orphan clauses (doc_id not in CONTRACTS)",
@@ -64,15 +72,77 @@ CHECKS = [
         "WHERE NOT EXISTS (SELECT 1 FROM CLAUSES c WHERE c.CATEGORY = cc.CATEGORY))",
         0,
     ),
+    # --- derived dimensions ---------------------------------------------------
+    (
+        "dimension rows not in CONTRACTS",
+        "SELECT COUNT(*) FROM CONTRACT_DIM d LEFT JOIN CONTRACTS c ON c.DOC_ID = d.DOC_ID "
+        "WHERE c.DOC_ID IS NULL",
+        0,
+    ),
+    (
+        "party rows not in CONTRACTS",
+        "SELECT COUNT(*) FROM CONTRACT_PARTY p LEFT JOIN CONTRACTS c ON c.DOC_ID = p.DOC_ID "
+        "WHERE c.DOC_ID IS NULL",
+        0,
+    ),
+    (
+        "related docs not in CONTRACTS",
+        "SELECT COUNT(*) FROM RELATED_DOC r LEFT JOIN CONTRACTS c "
+        "ON c.DOC_ID = r.RELATED_DOC_ID WHERE c.DOC_ID IS NULL",
+        0,
+    ),
+    (
+        "self-referencing related docs",
+        "SELECT COUNT(*) FROM RELATED_DOC WHERE DOC_ID = RELATED_DOC_ID",
+        0,
+    ),
+    (
+        "category stats not covering all 41 categories",
+        "SELECT (SELECT COUNT(*) FROM CLAUSE_CATEGORIES) - (SELECT COUNT(*) FROM CATEGORY_STATS)",
+        0,
+    ),
+    (
+        "category stats doc_count disagreeing with CLAUSES",
+        "SELECT COUNT(*) FROM CATEGORY_STATS s WHERE s.DOC_COUNT <> "
+        "(SELECT COUNT(DISTINCT c.DOC_ID) FROM CLAUSES c WHERE c.CATEGORY = s.CATEGORY)",
+        0,
+    ),
+    (
+        "browse view rows != contracts",
+        "SELECT (SELECT COUNT(*) FROM V_CONTRACT_BROWSE) - (SELECT COUNT(*) FROM CONTRACTS)",
+        0,
+    ),
+    (
+        "facet year counts not summing to contracts",
+        "SELECT (SELECT COUNT(*) FROM CONTRACTS) - (SELECT COALESCE(SUM(DOC_COUNT),0) FROM V_FACET_YEAR)",
+        0,
+    ),
+    (
+        "facet jurisdiction counts not summing to contracts",
+        "SELECT (SELECT COUNT(*) FROM CONTRACTS) - "
+        "(SELECT COALESCE(SUM(DOC_COUNT),0) FROM V_FACET_JURISDICTION)",
+        0,
+    ),
+    (
+        "more than 20 contracts with no related documents",
+        "SELECT IFF((SELECT COUNT(*) FROM CONTRACTS c WHERE NOT EXISTS "
+        "(SELECT 1 FROM RELATED_DOC r WHERE r.DOC_ID = c.DOC_ID)) <= 20, 0, 1)",
+        0,
+    ),
 ]
 
 
 def main() -> int:
-    if not MANIFEST.exists():
-        print(f"error: {MANIFEST} missing. Run `make build`.", file=sys.stderr)
-        return 1
+    dim_manifest = ROOT / "build" / "dimensions.json"
+    for path in (MANIFEST, dim_manifest):
+        if not path.exists():
+            print(f"error: {path.relative_to(ROOT)} missing. Run `make build`.", file=sys.stderr)
+            return 1
 
     expected = json.loads(MANIFEST.read_text())["counts"]
+    dims = json.loads(dim_manifest.read_text())
+    expected.update(dims["counts"])
+    rates = dims["rates"]
 
     failures: list[str] = []
     rows: list[tuple[str, str, str, str]] = []
@@ -83,8 +153,8 @@ def main() -> int:
         cur.execute("USE SCHEMA CORPUS")
         cur.execute("USE WAREHOUSE CUAD_WH")
 
-        for name in TABLES:
-            cur.execute(TABLES_SQL[name])
+        for name in TABLES + DIM_TABLES:
+            cur.execute((TABLES_SQL | DIM_SQL)[name])
             actual = cur.fetchone()[0]
             want = expected[name]
             ok = actual == want
@@ -120,6 +190,15 @@ def main() -> int:
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
         return 1
+
+    total = rates["documents"]
+    print("\nparse rates (build-time, informational)")
+    for label, key in (
+        ("type classified", "type_classified"),
+        ("year parsed", "year_parsed"),
+        ("jurisdiction parsed", "jurisdiction_parsed"),
+    ):
+        print(f"  {label:<22} {rates[key]:>4}/{total} ({rates[key] * 100 // total}%)")
 
     print("\nall checks passed")
     return 0
