@@ -5,16 +5,76 @@ lawyer-facing search UI with three demo logins.
 
 ## Current status
 
-**Step 1 of N complete: local environment + credentials.**
+**Step 2 of N complete: the corpus is in Snowflake.**
 
 - [x] Python 3.14 virtualenv
 - [x] Snowflake CLI + Python connector in `.venv`
 - [x] `.env`-driven auth (no `config.toml`, no global state)
-- [ ] Download CUAD JSON
-- [ ] Build load files
-- [ ] Snowflake objects + load
+- [x] Download CUAD JSON
+- [x] Build load files
+- [x] Snowflake objects + load + verification
 - [ ] Demo users
 - [ ] Streamlit app
+
+## Run it
+
+One command does the whole corpus:
+
+```bash
+make pipeline
+```
+
+Or step by step:
+
+| Command | Does | Expected |
+|---|---|---|
+| `make download` | Fetch `CUADv1.json` + `category_descriptions.csv` into `data/cuad/` | 510 contracts, 13,823 spans, 41 categories |
+| `make build` | Write `build/*.ndjson` + `manifest.json` | 510 / 510 / 13,823 / 41 rows |
+| `make setup` | Create `CUAD_WH`, `CUAD_DB.CORPUS`, tables, stage | objects created |
+| `make load` | `PUT` + `COPY INTO` the four tables | 4x `LOADED`, 0 errors |
+| `make views` | Create `V_CONTRACT_METADATA`, `V_CONTRACT_CATEGORY_STATUS` | views created |
+| `make verify` | Assert counts + referential integrity | `all checks passed` |
+
+`make download` and `make build` need no Snowflake access. `make verify`
+exits non-zero on any mismatch, so it works as a gate.
+
+## Data model
+
+```
+CUAD_DB.CORPUS
+├── CONTRACTS                510  (DOC_ID, TITLE, CHAR_LEN)
+├── CONTRACT_TEXT            510  (DOC_ID, FULL_TEXT)          -- whole-doc search
+├── CLAUSES               13,823  one row per answer span
+│                                 (CLAUSE_ID, DOC_ID, CATEGORY, QUESTION,
+│                                  ANSWER_TEXT, ANSWER_START, ANSWER_END)
+├── CLAUSE_CATEGORIES         41  (CATEGORY, DESCRIPTION, ANSWER_FORMAT, GRP)
+├── V_CONTRACT_METADATA      510  document register, pivoted from clause answers
+└── V_CONTRACT_CATEGORY_STATUS    every doc x category, FOUND + SPAN_COUNT
+```
+
+Two things worth knowing:
+
+- **There is no metadata column in CUAD.** Parties, dates and governing law
+  exist only as clause answers, so `V_CONTRACT_METADATA` pivots 8 documentary
+  categories out of `CLAUSES`. Coverage: parties 509/510, agreement date
+  470/510, governing law 437/510.
+- **`CLAUSES` holds one row per answer span**, not per question. 20,910
+  questions produce 13,823 spans; unanswered questions carry nothing to search.
+
+## Loading notes
+
+- **NDJSON, not CSV.** Contract text contains embedded newlines, quotes and
+  commas. Snowflake's JSON loader handles that natively; CSV does not.
+- **Category names disagree between the two source files.** `CUADv1.json`
+  title-cases them (`Notice Period To Terminate Renewal`) while
+  `category_descriptions.csv` does not (`...to...`). Ten categories differ.
+  `build_load_files.py` normalizes case-insensitively and stores the CSV
+  spelling, so `CLAUSES.CATEGORY` joins cleanly to `CLAUSE_CATEGORIES`.
+- **`make load` truncates before copying**, so re-running replaces rather than
+  appends. `PUT ... OVERWRITE = TRUE` replaces the staged file.
+- Offsets are validated at build time: every span is checked against
+  `context[answer_start:answer_end]` and the build fails on mismatch.
+
 
 ## Prerequisites
 
@@ -125,14 +185,24 @@ make query Q='select current_user()'
 .env.example          template (committed)
 .env                  real values (gitignored, 600)
 requirements.txt      pinned deps
-Makefile              bootstrap / doctor / sql / query
+Makefile              bootstrap / doctor / download / build / load / verify
+sql/
+  00_setup.sql        warehouse, database, schema
+  01_tables.sql       tables, file format, stage
+  02_load.sql         PUT + COPY (rendered with the build path)
+  03_views.sql        document register + category status
+  99_teardown.sql     drop database and warehouse
 scripts/
   bootstrap.sh        venv + install + seed .env
   gen_keypair.sh      RSA key pair + ALTER USER statement
   envcheck.py         .env validation + connection test
+  download_cuad.py    fetch CUAD artifacts
+  build_load_files.py CUADv1.json -> NDJSON
+  verify_load.py      assert counts and integrity
+  sf.py               shared connection helper
+data/cuad/             downloaded source (gitignored)
+build/                generated NDJSON + manifest (gitignored)
 keys/                 private keys (gitignored, 700)
-data/                 CUAD download (gitignored)
-build/                generated load files (gitignored)
 ```
 
 ## Notes
