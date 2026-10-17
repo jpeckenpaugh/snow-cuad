@@ -381,12 +381,14 @@ def page_contracts() -> None:
         hits = queries.clause_matches(term, selected_clauses or None)
         if not hits:
             st.caption("No clause answers contain that term.")
-        for doc_id, title, category, answer in hits:
+        for index, (doc_id, title, category, answer) in enumerate(hits):
             with st.container(border=True):
                 cols = st.columns([5, 1])
                 cols[0].markdown(f"**{title}**")
                 cols[0].html(f'<span class="small">{html.escape(category)}</span>')
-                if cols[1].button("Open", key=f"hit-{doc_id}-{category}", width="stretch"):
+                # index, not doc_id+category: one contract can have several
+                # spans for the same category, which would collide.
+                if cols[1].button("Open", key=f"hit-{index}", width="stretch"):
                     nav(doc=doc_id, nav="document")
                 st.html(f'<div class="snippet">{highlight(answer, term)}</div>')
 
