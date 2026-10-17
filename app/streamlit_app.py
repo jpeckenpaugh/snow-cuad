@@ -176,12 +176,27 @@ def login_screen() -> None:
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
         if submitted:
-            user = auth.check_login(username.strip().lower(), password)
+            backend_error = None
+            try:
+                user = auth.check_login(username.strip().lower(), password)
+            except auth.AuthBackendError as exc:
+                user = None
+                backend_error = str(exc)
+
             if user:
                 st.session_state.user = user
                 st.rerun()
+
+            if backend_error:
+                st.error(f"Could not read the login store: {backend_error}")
             else:
                 st.error("Invalid username or password.")
+                if auth.user_count() == 0:
+                    st.warning(
+                        "APP_USERS is empty: no logins have been seeded for this "
+                        "database. Run `make users`, then use the passwords in "
+                        "credentials.txt."
+                    )
         st.html(
             '<p class="small">Demo logins are in <code>credentials.txt</code>, '
             "written by <code>make users</code>.</p>"

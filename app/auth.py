@@ -19,12 +19,28 @@ import db
 from credentials import verify_password
 
 
+class AuthBackendError(RuntimeError):
+    """The credential store could not be read. Not the same as a bad password."""
+
+
 def current_user() -> dict:
     return st.session_state.get("user") or {}
 
 
+def user_count() -> int | None:
+    """Rows in APP_USERS, or None if it cannot be read."""
+    try:
+        return db.q("SELECT COUNT(*) FROM APP_USERS")[0][0]
+    except RuntimeError:
+        return None
+
+
 def check_login(username: str, password: str) -> dict | None:
     """Verify credentials, log the attempt, and return the session user.
+
+    Returns None for a rejected login. Raises AuthBackendError if the store
+    itself is unreadable - that is an operations problem, and reporting it as
+    "invalid password" hides the cause.
 
     Password is checked before status so a suspended account with the wrong
     password is recorded as a bad password, not as a suspension probe.
@@ -35,8 +51,8 @@ def check_login(username: str, password: str) -> dict | None:
             "FROM APP_USERS WHERE USERNAME = %s",
             (username,),
         )
-    except RuntimeError:
-        return None
+    except RuntimeError as exc:
+        raise AuthBackendError(str(exc)) from exc
 
     if not rows:
         audit.log_login_failure(username, "no such user")

@@ -38,8 +38,8 @@ help: ## Show available targets
 	@echo "    service-user Create the STREAMLITWEB service user, key pair, .env.service"
 	@echo "    verify       Assert counts and referential integrity"
 	@echo "    verify-privileges  Assert the service identity is least-privilege"
-	@echo "    pipeline     download -> build -> setup -> load -> views -> grants"
-	@echo "                 -> service-user -> verify"
+	@echo "    pipeline     full rebuild: download -> build -> setup -> load -> views"
+	@echo "                 -> grants -> service-user -> users -> verify"
 	@echo
 	@echo "  3. Application"
 	@echo "    users        Create the three demo logins, write credentials.txt"
@@ -106,7 +106,7 @@ service-user: ## Create the STREAMLITWEB service user, key pair and .env.service
 verify-privileges: ## Assert the service identity can do only what it should
 	$(PY) scripts/verify_privileges.py
 
-pipeline: ## Run the whole corpus load end to end, then provision the service identity
+pipeline: ## Full rebuild: corpus, service identity, logins, verification
 	@$(MAKE) --no-print-directory download
 	@$(MAKE) --no-print-directory build
 	@$(MAKE) --no-print-directory setup
@@ -114,6 +114,7 @@ pipeline: ## Run the whole corpus load end to end, then provision the service id
 	@$(MAKE) --no-print-directory views
 	@$(MAKE) --no-print-directory grants
 	@$(MAKE) --no-print-directory service-user
+	@$(MAKE) --no-print-directory users
 	@$(MAKE) --no-print-directory verify
 
 # --- 3. Application ----------------------------------------------------------

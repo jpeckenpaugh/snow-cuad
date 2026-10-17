@@ -183,13 +183,18 @@ Or step by step:
 | `make views` | Create the corpus views and `ACCESS_LOG` | views + log created |
 | `make grants` | Create `STREAMLITWEB_ROLE` and apply its grants | role + grants applied |
 | `make service-user` | Create the `STREAMLITWEB` user, key pair, `.env.service` | service identity ready |
+| `make users` | Seed 3 lawyers + 1 auditor + 1 admin, write `credentials.txt` | 5 logins |
 | `make verify` | Assert counts, integrity, roles and parse rates | `all checks passed` |
 | `make verify-privileges` | Assert the service identity is least-privilege | `least-privilege` |
-| `make users` | Seed 3 lawyers + 1 auditor + 1 admin, write `credentials.txt` | 5 logins |
 
 `make pipeline` runs download → build → setup → load → views → grants →
-service-user → verify. `make users` and `make verify-privileges` are the two
-steps you run after it.
+service-user → users → verify, so a rebuild leaves a **usable** system: corpus
+loaded, service identity provisioned, logins seeded, everything verified.
+
+`make users` is idempotent — it only creates missing accounts. That matters
+after `make teardown`, which drops `APP_USERS` with the database: the next
+`make pipeline` recreates all five logins with **new passwords** and rewrites
+`credentials.txt`. Plan for that rather than being surprised by it.
 
 `make download` and `make build` need no Snowflake access. `make verify`
 exits non-zero on any mismatch, so it works as a gate.
@@ -240,6 +245,10 @@ Things worth knowing:
   spelling, so `CLAUSES.CATEGORY` joins cleanly to `CLAUSE_CATEGORIES`.
 - **`make load` truncates before copying**, so re-running replaces rather than
   appends. `PUT ... OVERWRITE = TRUE` replaces the staged file.
+- An empty `APP_USERS` is a real failure mode: the app runs, the connection
+  works, and every login is rejected. The login screen now says so explicitly
+  rather than reporting "invalid password", and `make pipeline` seeds the
+  logins so a rebuild cannot leave you there.
 - Offsets are validated at build time: every span is checked against
   `context[answer_start:answer_end]` and the build fails on mismatch.
 
