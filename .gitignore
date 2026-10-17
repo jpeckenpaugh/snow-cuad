@@ -1,0 +1,20 @@
+# Environment / secrets
+.env
+credentials.txt
+keys/
+.streamlit/secrets.toml
+
+# Local Python env
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Generated data (recreated by `make download` / `make build`)
+data/
+build/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

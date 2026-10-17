@@ -1,0 +1,15 @@
+# Snowflake CLI (provides the `snow` command)
+snowflake-cli==3.29.0
+
+# Python driver used by scripts/ and the Streamlit app.
+# Must be the exact version snowflake-cli pins (it depends on ==4.7.5);
+# 5.x exists but conflicts with the CLI.
+snowflake-connector-python==4.7.5
+
+# App + env parsing
+streamlit==1.66.0
+python-dotenv==1.2.2
+
+# Streamlit pulls in the newest pyarrow, but connector 4.7.5 rejects >=24 on
+# Python 3.14. 23.0.1 is the newest release that satisfies both.
+pyarrow==23.0.1
