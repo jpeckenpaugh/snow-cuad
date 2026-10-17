@@ -57,7 +57,7 @@ printf '  %-12s %s\n' "python"    "$("$VENV/bin/python" -V 2>&1)"
 
 say "Next"
 cat <<'EOF'
-  1. Fill in .env:      $EDITOR .env
-  2. Generate a key:    make keypair        # then register the printed public key
+  1. Fill in .env:       $EDITOR .env
+  2. Add a key pair:     make keypair       # registers it; your password keeps working
   3. Validate + connect: make doctor
 EOF

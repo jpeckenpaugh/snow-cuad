@@ -76,32 +76,56 @@ All auth flows through environment variables, which both `snow` and the
 Python connector read. Nothing is written to `~/.snowflake/config.toml`,
 so this repo never interferes with your other Snowflake work.
 
-### Option A - key pair (recommended, and automated)
+### Either or, never one or the other
+
+`.env` carries **both** credentials, and both stay valid in Snowflake:
+
+```dotenv
+SNOWFLAKE_PRIVATE_KEY_PATH=./keys/snowflake_key.p8
+SNOWFLAKE_PASSWORD=<your password>
+```
+
+The tooling tries key-pair first and falls back to the password. A key that is
+rotated, unregistered, or missing therefore degrades to a slower login instead
+of a lockout. Nothing is ever swapped out from under you:
 
 ```bash
 make bootstrap          # creates .env from .env.example
-make keypair            # generate, register, verify, switch .env
+make keypair            # generates AND registers a key pair, alongside your password
 ```
 
-`make keypair` does all four steps against the connection you already have:
+`make keypair` does the whole job against the connection you already have:
 
-1. generate `keys/snowflake_key.p8` (reused if present; `FORCE=1` to rotate)
-2. `ALTER USER <you> SET RSA_PUBLIC_KEY='...'` using your current credentials
-3. **verify** the new key authenticates, before touching anything
-4. only then rewrite `.env` to `SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE_JWT`
+1. connect using whatever credential currently works
+2. generate `keys/snowflake_key.p8` (reused if present; `FORCE=1` to rotate)
+3. register the public half in Snowflake's spare slot, `RSA_PUBLIC_KEY_2`
+4. **verify** the new key authenticates
+5. promote it to `RSA_PUBLIC_KEY` and free the spare slot
+6. rewrite `.env` so both credentials are present and active
 
-Steps 3 and 4 are in that order deliberately. If verification fails, `.env` is
-left alone and your password login still works. The old `SNOWFLAKE_AUTHENTICATOR`
-and `SNOWFLAKE_PASSWORD` lines are kept as comments, so reverting is
-uncommenting two lines.
+If verification fails at step 4, the spare slot is unset, the staged key file is
+removed, and `.env` is untouched — so a bad rotation cannot cost you access.
+`--no-switch` stops after step 3.
 
-```dotenv
-SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE_JWT
-SNOWFLAKE_PRIVATE_KEY_PATH=./keys/snowflake_key.p8
+Because both are present, a fallback is reported rather than hidden:
+
+```
+warning: fell back to password auth (key-pair: 390144 (28000): ... JWT token is invalid)
 ```
 
-`--no-switch` stops after step 2 if you want to register a key without
-activating it.
+### The `snow` CLI needs a hint
+
+The Python connector falls back on its own. The Snowflake CLI does not: given a
+private key path and no authenticator it refuses outright, and given both it
+still will not retry. So `scripts/snow.sh` resolves which credential works
+before every invocation and exports exactly one:
+
+```
+note: snow CLI using password auth (key-pair unavailable)
+```
+
+This is why `make` survives a broken key end to end — verified by running a
+full `make pipeline` against an unregistered key: exit 0, 14 fallback notices.
 
 ### How key-pair auth works
 
@@ -116,19 +140,9 @@ No secret is transmitted. And because this is not password auth, the account's
 MFA-for-passwords policy does not apply — which is what lets `make` run
 unattended.
 
-Rotation is why Snowflake keeps two slots (`RSA_PUBLIC_KEY` and
-`RSA_PUBLIC_KEY_2`): register the new key in slot 2, cut over, retire the old
-one, with no downtime.
-
-### Option B - password
-
-```dotenv
-SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE
-SNOWFLAKE_PASSWORD=...
-```
-
-May trigger an MFA prompt on every `snow` invocation. Fine for a one-off
-trial, unpleasant in a loop.
+Snowflake keeps two key slots (`RSA_PUBLIC_KEY` and `RSA_PUBLIC_KEY_2`). That
+is what makes the rotation above non-destructive: the new key is proven in the
+spare slot before it replaces the live one.
 
 ### Where to find the account identifier
 
@@ -595,7 +609,7 @@ sql/
   99_teardown.sql     drop user, role, database and warehouse
 scripts/
   bootstrap.sh        venv + install + seed .env
-  manage_keypair.py   generate + register the admin key pair, switch .env
+  manage_keypair.py   generate + register the admin key pair (either-or .env)
   envcheck.py         .env validation + connection test
   download_cuad.py    fetch CUAD artifacts
   build_load_files.py CUADv1.json -> NDJSON
@@ -604,6 +618,8 @@ scripts/
   create_users.py     seed 3 lawyers + auditor + admin, write credentials.txt
   credentials.py      password generation and PBKDF2 hashing (shared)
   create_service_user.py  STREAMLITWEB user + key pair + .env.service
+  resolve_auth.py     decide which credential the snow CLI should use
+  snow.sh             snow wrapper: load .env, resolve auth, exec
   verify_privileges.py    prove the service identity is least-privilege
   sf.py               shared connection helper (env_file selectable)
 app/
@@ -640,6 +656,11 @@ keys/                 private keys (gitignored, 700)
 - `.env.service` is generated, so do not edit it by hand: re-run
   `make service-user` after rotating the key (`--force`) or changing the
   account.
+- The two identities are independent. Rotating the admin key with
+  `FORCE=1 make keypair` does not touch `STREAMLITWEB`, and `FORCE=1 make
+  service-user` does not touch yours.
+- `SNOWFLAKE_AUTHENTICATOR` is optional and only sets which credential is tried
+  first. It is not a filter: the other one is still attempted.
 - `sf.py` pins the Snowflake session to `TIMEZONE = 'UTC'` so `CREATED_AT` and
   `ACCESS_LOG.EVENT_TS` are comparable with UTC report cutoffs instead of
   inheriting the account's default session timezone.

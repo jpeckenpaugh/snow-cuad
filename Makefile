@@ -1,14 +1,12 @@
 SHELL := /bin/bash
 CURDIR := $(shell pwd)
 PY    := .venv/bin/python
-SNOW  := .venv/bin/snow
+SNOW  := ./scripts/snow.sh
 
-# Export .env into the environment, then drop DATABASE/SCHEMA/WAREHOUSE so the
-# connection never tries to use objects that may not exist yet. Every SQL file
-# sets them explicitly.
-SQL_ENV = set -a; source .env; set +a; \
-          unset SNOWFLAKE_DATABASE SNOWFLAKE_SCHEMA SNOWFLAKE_WAREHOUSE; \
-          $(SNOW) sql -x
+# scripts/snow.sh loads .env, resolves which credential works, drops
+# DATABASE/SCHEMA/WAREHOUSE so the connection never reaches for objects that
+# may not exist yet, and execs the real CLI. Every SQL file sets them explicitly.
+SQL_ENV = $(SNOW) sql -x
 
 RENDERED := build/02_load.rendered.sql
 RENDERED_DIM := build/05_dimensions.rendered.sql

@@ -61,18 +61,24 @@ def main() -> int:
         elif val.startswith(PLACEHOLDER_PREFIXES):
             errors.append(f"{key} still holds the placeholder {val!r}")
 
-    auth = os.getenv("SNOWFLAKE_AUTHENTICATOR", "SNOWFLAKE")
-    if auth == "SNOWFLAKE_JWT":
-        key_path = Path(os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH", "")).expanduser()
+    # Either or: a key pair, a password, or both. Both is the intended state.
+    key_setting = os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH")
+    key_path = None
+    if key_setting:
+        key_path = Path(key_setting).expanduser()
         if not key_path.is_absolute():
             key_path = ROOT / key_path
-        if not key_path.exists():
-            errors.append(f"SNOWFLAKE_PRIVATE_KEY_PATH not found: {key_path} (run `make keypair`)")
-    elif auth in ("SNOWFLAKE", "USERNAME_PASSWORD_MFA"):
-        if not os.getenv("SNOWFLAKE_PASSWORD"):
-            errors.append("SNOWFLAKE_PASSWORD is required for password auth")
-    else:
-        errors.append(f"unsupported SNOWFLAKE_AUTHENTICATOR={auth!r}")
+
+    key_usable = bool(key_path and key_path.exists())
+    password_set = bool(os.getenv("SNOWFLAKE_PASSWORD"))
+
+    if not key_usable and not password_set:
+        errors.append(
+            "no usable credentials: set SNOWFLAKE_PASSWORD and/or "
+            "SNOWFLAKE_PRIVATE_KEY_PATH (run `make keypair`)"
+        )
+    if key_setting and not key_usable:
+        print(f"  note: {key_path} not found; the password will be used", file=sys.stderr)
 
     print("\nconfiguration")
     for key in [
@@ -81,9 +87,9 @@ def main() -> int:
         "SNOWFLAKE_ROLE",
         "SNOWFLAKE_DATABASE",
         "SNOWFLAKE_SCHEMA",
-        "SNOWFLAKE_AUTHENTICATOR",
         "SNOWFLAKE_PRIVATE_KEY_PATH",
         "SNOWFLAKE_PASSWORD",
+        "SNOWFLAKE_AUTHENTICATOR",
     ]:
         val = os.getenv(key)
         if val is not None:
@@ -102,26 +108,10 @@ def main() -> int:
         return 0
 
     try:
-        import snowflake.connector as sf
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from sf import connect as sf_connect
 
-        params = {
-            "account": os.environ["SNOWFLAKE_ACCOUNT"],
-            "user": os.environ["SNOWFLAKE_USER"],
-            "role": os.environ["SNOWFLAKE_ROLE"],
-            "database": os.environ["SNOWFLAKE_DATABASE"],
-            "schema": os.environ["SNOWFLAKE_SCHEMA"],
-            "authenticator": auth,
-            "login_timeout": 20,
-        }
-        if auth == "SNOWFLAKE_JWT":
-            p = Path(os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH", "")).expanduser()
-            params["private_key_file"] = str(p if p.is_absolute() else ROOT / p)
-            if os.getenv("PRIVATE_KEY_PASSPHRASE"):
-                params["private_key_file_pwd"] = os.environ["PRIVATE_KEY_PASSPHRASE"]
-        else:
-            params["password"] = os.environ["SNOWFLAKE_PASSWORD"]
-
-        with sf.connect(**params) as conn:
+        with sf_connect() as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT CURRENT_USER(), CURRENT_ROLE(), CURRENT_ACCOUNT(), "
