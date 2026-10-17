@@ -22,7 +22,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import base64
 import os
 import sys
 from pathlib import Path
@@ -33,6 +32,7 @@ if str(ROOT / "scripts") not in sys.path:
 
 from dotenv import load_dotenv  # noqa: E402
 
+from credentials import load_or_create_key_pair  # noqa: E402
 from sf import FALLBACK_WAREHOUSE, connect  # noqa: E402
 
 USER = "STREAMLITWEB"
@@ -40,42 +40,6 @@ ROLE = "STREAMLITWEB_ROLE"
 KEY_PATH = ROOT / "keys" / "streamlitweb_key.p8"
 SERVICE_ENV = ROOT / ".env.service"
 STATEMENT_TIMEOUT = 60
-
-
-def load_or_create_key(force: bool) -> str:
-    """Return the base64 body of the service user's public key."""
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-
-    if KEY_PATH.exists() and not force:
-        key = serialization.load_pem_private_key(KEY_PATH.read_bytes(), password=None)
-    else:
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        KEY_PATH.write_bytes(
-            key.private_bytes(
-                serialization.Encoding.PEM,
-                serialization.PrivateFormat.PKCS8,
-                serialization.NoEncryption(),
-            )
-        )
-        KEY_PATH.chmod(0o600)
-        print(f"generated {KEY_PATH.relative_to(ROOT)}")
-
-    public = key.public_key()
-    (KEY_PATH.with_suffix(".pub")).write_bytes(
-        public.public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-    )
-    # Snowflake wants the base64 body only: no PEM headers, no newlines.
-    return base64.b64encode(
-        public.public_bytes(
-            serialization.Encoding.DER,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-    ).decode()
 
 
 def write_service_env() -> list[str]:
@@ -108,7 +72,9 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="rotate the key pair")
     args = ap.parse_args()
 
-    public_key = load_or_create_key(args.force)
+    existed = KEY_PATH.exists()
+    public_key = load_or_create_key_pair(KEY_PATH, force=args.force)
+    print(f"{'reused' if existed and not args.force else 'generated'} {KEY_PATH.relative_to(ROOT)}")
 
     with connect(database="CUAD_DB", schema="CORPUS") as conn:
         cur = conn.cursor()

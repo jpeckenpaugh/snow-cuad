@@ -62,38 +62,63 @@ Verified at bootstrap time: `snowflake-cli 3.29.0` is a pure-Python wheel
 
 ## Credentials
 
+There are **two** Snowflake identities, with separate credentials:
+
+| Identity | Credential | Secret in | Used by |
+|---|---|---|---|
+| you, as `ACCOUNTADMIN` | key pair (or password) | `.env` + `keys/snowflake_key.p8` | `make` — onboarding |
+| `STREAMLITWEB` | key pair | `.env.service` + `keys/streamlitweb_key.p8` | the app |
+
+`make keypair` provisions the first, `make service-user` the second. The
+service identity is covered in [Least privilege](#5-least-privilege).
+
 All auth flows through environment variables, which both `snow` and the
 Python connector read. Nothing is written to `~/.snowflake/config.toml`,
 so this repo never interferes with your other Snowflake work.
 
-### Option A - key pair (recommended)
-
-Recommended because Snowflake now enforces MFA for human users signing in
-with passwords, which is awkward for scripted `snow sql` calls.
+### Option A - key pair (recommended, and automated)
 
 ```bash
-make bootstrap          # creates .env
-make keypair            # writes keys/snowflake_key.p8, prints ALTER USER
+make bootstrap          # creates .env from .env.example
+make keypair            # generate, register, verify, switch .env
 ```
 
-Then in a Snowflake worksheet (as `ACCOUNTADMIN`, or a role that owns the
-user), run the `ALTER USER ... SET RSA_PUBLIC_KEY='...'` statement that
-`make keypair` printed. That has to be done out-of-band: the key is not
-trusted yet, so the CLI cannot do it for you.
+`make keypair` does all four steps against the connection you already have:
 
-`.env` should contain:
+1. generate `keys/snowflake_key.p8` (reused if present; `FORCE=1` to rotate)
+2. `ALTER USER <you> SET RSA_PUBLIC_KEY='...'` using your current credentials
+3. **verify** the new key authenticates, before touching anything
+4. only then rewrite `.env` to `SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE_JWT`
+
+Steps 3 and 4 are in that order deliberately. If verification fails, `.env` is
+left alone and your password login still works. The old `SNOWFLAKE_AUTHENTICATOR`
+and `SNOWFLAKE_PASSWORD` lines are kept as comments, so reverting is
+uncommenting two lines.
 
 ```dotenv
-SNOWFLAKE_ACCOUNT=myorg-myaccount
-SNOWFLAKE_USER=MY_LOGIN
-SNOWFLAKE_ROLE=ACCOUNTADMIN
-SNOWFLAKE_DATABASE=CUAD_DB
-SNOWFLAKE_SCHEMA=CORPUS
-
 SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE_JWT
 SNOWFLAKE_PRIVATE_KEY_PATH=./keys/snowflake_key.p8
-PRIVATE_KEY_PASSPHRASE=
 ```
+
+`--no-switch` stops after step 2 if you want to register a key without
+activating it.
+
+### How key-pair auth works
+
+The key is generated **once**, not per step or per session:
+
+- the **private** half never leaves the machine (`keys/snowflake_key.p8`, mode 600)
+- the **public** half is registered on the Snowflake user
+- each connection derives a short-lived **JWT** signed with the private key,
+  which Snowflake verifies against the stored public key
+
+No secret is transmitted. And because this is not password auth, the account's
+MFA-for-passwords policy does not apply — which is what lets `make` run
+unattended.
+
+Rotation is why Snowflake keeps two slots (`RSA_PUBLIC_KEY` and
+`RSA_PUBLIC_KEY_2`): register the new key in slot 2, cut over, retire the old
+one, with no downtime.
 
 ### Option B - password
 
@@ -570,7 +595,7 @@ sql/
   99_teardown.sql     drop user, role, database and warehouse
 scripts/
   bootstrap.sh        venv + install + seed .env
-  gen_keypair.sh      RSA key pair + ALTER USER statement
+  manage_keypair.py   generate + register the admin key pair, switch .env
   envcheck.py         .env validation + connection test
   download_cuad.py    fetch CUAD artifacts
   build_load_files.py CUADv1.json -> NDJSON

@@ -26,7 +26,7 @@ help: ## Show available targets
 	@echo
 	@echo "  1. Environment"
 	@echo "    bootstrap    Create .venv (Python 3.14), install deps, seed .env"
-	@echo "    keypair      Generate RSA key pair for key-pair auth"
+	@echo "    keypair      Generate + register your admin key pair, switch .env"
 	@echo "    check-env    Validate .env locally (no network)"
 	@echo "    doctor       Validate .env and test the Snowflake connection"
 	@echo
@@ -59,8 +59,8 @@ help: ## Show available targets
 bootstrap: ## Create venv, install CLI, seed .env
 	./scripts/bootstrap.sh
 
-keypair: ## Generate RSA key pair for key-pair authentication
-	./scripts/gen_keypair.sh
+keypair: ## Generate + register a key pair for your admin user, switch .env to it
+	$(PY) scripts/manage_keypair.py $(if $(FORCE),--force,)
 
 check-env: ## Validate .env without connecting
 	$(PY) scripts/envcheck.py
@@ -103,7 +103,7 @@ grants: ## Apply the STREAMLITWEB_ROLE grants (safe to re-run)
 	@$(MAKE) --no-print-directory sql FILE=sql/08_grants.sql
 
 service-user: ## Create the STREAMLITWEB service user, key pair and .env.service
-	$(PY) scripts/create_service_user.py
+	$(PY) scripts/create_service_user.py $(if $(FORCE),--force,)
 
 verify-privileges: ## Assert the service identity can do only what it should
 	$(PY) scripts/verify_privileges.py

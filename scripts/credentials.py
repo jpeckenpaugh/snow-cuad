@@ -49,3 +49,49 @@ def new_credential(password: str | None = None, iterations: int = DEFAULT_ITERAT
         "digest": hash_password(password, salt, iterations),
         "iterations": iterations,
     }
+
+
+# --- RSA key pairs -----------------------------------------------------------
+
+def load_or_create_key_pair(path: "Path", force: bool = False) -> str:
+    """Ensure an RSA key pair exists at path; return the base64 public key.
+
+    Writes <path> (PKCS#8 private, mode 600) and <path with .pub> (PEM public).
+    Snowflake wants the base64 body of the public key: the DER bytes, no PEM
+    headers, no newlines.
+    """
+    import base64
+    from pathlib import Path
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    path = Path(path)
+
+    if path.exists() and not force:
+        key = serialization.load_pem_private_key(path.read_bytes(), password=None)
+    else:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        path.chmod(0o600)
+
+    public = key.public_key()
+    path.with_suffix(".pub").write_bytes(
+        public.public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    return base64.b64encode(
+        public.public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    ).decode()
