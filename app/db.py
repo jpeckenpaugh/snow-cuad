@@ -6,6 +6,7 @@ from user input.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -17,10 +18,19 @@ if str(ROOT / "scripts") not in sys.path:
 
 from sf import connect  # noqa: E402
 
+# Which credentials file the app reads. Locally `.env` (your ACCOUNTADMIN
+# login, which is what `make` needs); on a server, point CUAD_ENV_FILE at
+# `.env.service` to run as the least-privilege STREAMLITWEB identity:
+#     CUAD_ENV_FILE=.env.service make app
+ENV_FILE = os.getenv("CUAD_ENV_FILE", ".env")
+
 
 @st.cache_resource(show_spinner=False)
 def _connection():
-    return connect(warehouse="CUAD_WH", database="CUAD_DB", schema="CORPUS")
+    # Warehouse comes from SNOWFLAKE_WAREHOUSE in the env file, falling back to
+    # CUAD_WH, so the service deployment can point at a different warehouse
+    # without a code change.
+    return connect(env_file=ENV_FILE, database="CUAD_DB", schema="CORPUS")
 
 
 def q(sql: str, params: tuple = ()) -> list[tuple]:

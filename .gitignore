@@ -1,5 +1,6 @@
 # Environment / secrets
 .env
+.env.service
 credentials.txt
 keys/
 .streamlit/secrets.toml

@@ -9,7 +9,7 @@ See <https://www.atticusprojectai.org/cuad>.
 
 ## Current status
 
-**Step 5 of N complete: roles, admin console and access auditing.**
+**Step 6 of N complete: least-privilege service identity.**
 
 - [x] Python 3.14 virtualenv
 - [x] Snowflake CLI + Python connector in `.venv`
@@ -23,6 +23,7 @@ See <https://www.atticusprojectai.org/cuad>.
 - [x] Browse by clause / type / jurisdiction / counterparty + related documents
 - [x] Roles: lawyer / auditor / admin
 - [x] Admin console (create, suspend, reset) and an access audit log
+- [x] Three-layer auth: ACCOUNTADMIN onboarding, a STREAMLITWEB service identity, app logins
 
 ---
 
@@ -141,8 +142,15 @@ Or step by step:
 | `make setup` | Create `CUAD_WH`, `CUAD_DB.CORPUS`, the tables, stage, `APP_USERS` | objects created |
 | `make load` | `PUT` + `COPY INTO` all eight data tables | 8x `LOADED`, 0 errors |
 | `make views` | Create the corpus views and `ACCESS_LOG` | views + log created |
+| `make grants` | Create `STREAMLITWEB_ROLE` and apply its grants | role + grants applied |
+| `make service-user` | Create the `STREAMLITWEB` user, key pair, `.env.service` | service identity ready |
 | `make verify` | Assert counts, integrity, roles and parse rates | `all checks passed` |
+| `make verify-privileges` | Assert the service identity is least-privilege | `least-privilege` |
 | `make users` | Seed 3 lawyers + 1 auditor + 1 admin, write `credentials.txt` | 5 logins |
+
+`make pipeline` runs download → build → setup → load → views → grants →
+service-user → verify. `make users` and `make verify-privileges` are the two
+steps you run after it.
 
 `make download` and `make build` need no Snowflake access. `make verify`
 exits non-zero on any mismatch, so it works as a gate.
@@ -421,11 +429,129 @@ five logins are the same user.
 ---
 
 
+# 5. Least privilege
+
+Everything up to here ran the app as `ACCOUNTADMIN`. It now runs as a
+purpose-built service identity that can read the corpus, append audit rows and
+manage app users - and nothing else.
+
+## Three layers
+
+| # | Identity | Lives in | Held by | Can do |
+|---|---|---|---|---|
+| 1 | `ACCOUNTADMIN` | Snowflake | you, the human | **Onboarding only.** `make` - DDL, grants, seeding, teardown |
+| 2 | `STREAMLITWEB` (user) + `STREAMLITWEB_ROLE` (role) | Snowflake | the app | Read the corpus and views, append audit rows, manage app users |
+| 3 | `lawyer-001/002/003`, `admin`, `auditor` | application (`APP_USERS`) | people in a browser | Sign in to the app |
+
+Two things about layer 3 worth stating plainly:
+
+- **It is not a Snowflake layer.** All five logins share layer 2's single
+  session. Snowflake sees exactly one user, `STREAMLITWEB`.
+- Therefore **Snowflake RBAC cannot separate one lawyer from another**, and
+  `LOGIN_HISTORY` will never show a lawyer logging in. That separation lives in
+  the app (the `APP_ROLE` column plus `require_role()`), which is why
+  `ACCESS_LOG` exists.
+
+## The grants
+
+`sql/08_grants.sql`, applied by `make grants`:
+
+| Object | Granted | Withheld, deliberately |
+|---|---|---|
+| warehouse, database, schema | `USAGE` | - |
+| all + future tables and views | `SELECT` | - |
+| `APP_USERS` | `INSERT`, `UPDATE` | **`DELETE`** - suspension is a status change, so "never delete a user" is enforced by privilege, not convention |
+| `ACCESS_LOG` | `INSERT` | **`UPDATE`, `DELETE`** - an audit row the writer can rewrite is not an audit row |
+
+Object privileges can only be granted to roles in Snowflake, which is why layer
+2 is two objects wearing one name: the role carries the grants, the user
+carries the authentication.
+
+### Why the grants are re-applied every run
+
+`make setup` uses `CREATE OR REPLACE TABLE`. Replacing a table **drops its
+grants** - verified directly:
+
+```
+after GRANT, before replace          -> OWNERSHIP + SELECT
+after CREATE OR REPLACE              -> OWNERSHIP only        <- grant gone
+future grant, then CREATE OR REPLACE -> OWNERSHIP + SELECT    <- survives
+```
+
+So `make grants` is the last data step of `make pipeline`, and
+`sql/08_grants.sql` includes `ON FUTURE TABLES/VIEWS`. Without those, every
+pipeline run would silently revoke the app's access.
+
+## The service identity
+
+`make service-user` generates an RSA key pair and provisions the user:
+
+- **Key-pair, no password.** A user with no password cannot be challenged for
+  MFA and cannot sign in interactively at all.
+- `DEFAULT_ROLE = STREAMLITWEB_ROLE`, `DEFAULT_WAREHOUSE = CUAD_WH`.
+- `STATEMENT_TIMEOUT_IN_SECONDS = 60`, so a pathological query cannot pin the
+  warehouse.
+- Reuses an existing key unless `--force`, and re-syncs the public key onto the
+  user on every run.
+
+Files (both gitignored, mode 600):
+
+```
+keys/streamlitweb_key.p8    private key
+keys/streamlitweb_key.pub   public key
+.env.service                credentials for the app / server
+```
+
+## Running as the service identity
+
+```bash
+CUAD_ENV_FILE=.env.service make app
+```
+
+`CUAD_ENV_FILE` selects which credentials file the app reads. Locally it
+defaults to `.env` (your `ACCOUNTADMIN` login, which is what `make` needs); on a
+server, point it at `.env.service`. No renaming, no code edit.
+
+## Proving it
+
+```bash
+make verify-privileges
+```
+
+Connects as `STREAMLITWEB` and asserts both directions: 16 statements the app
+needs must succeed, and 10 it must never be able to run must be **denied**.
+
+```
+drop a corpus table      denied       truncate a corpus table   denied
+insert a fake contract   denied       update a clause           denied
+delete an app user       denied       rewrite an audit row      denied
+delete an audit row      denied       create a table            denied
+read account usage       denied       create a role             denied
+insert into ACCESS_LOG   allowed (rolled back)
+```
+
+The insert is proved inside a transaction that is rolled back, so verifying the
+grant does not pollute the audit log. Any denial that succeeds fails the command.
+
+## Cost guardrails (one-time, not in the pipeline)
+
+```sql
+CREATE RESOURCE MONITOR CUAD_WH_MONITOR WITH CREDIT_QUOTA = 5
+  TRIGGERS ON 80 PERCENT DO NOTIFY ON 100 PERCENT DO SUSPEND;
+ALTER WAREHOUSE CUAD_WH SET RESOURCE_MONITOR = CUAD_WH_MONITOR;
+```
+
+Deliberately not in `make pipeline`: `CREATE OR REPLACE RESOURCE MONITOR` would
+reset the credit counter on every run, so the quota could never trip.
+
+---
+
 # Layout
 
 ```
 .env.example          template (committed)
-.env                  real values (gitignored, 600)
+.env                  onboarding credentials (gitignored, 600)
+.env.service          STREAMLITWEB credentials for the app (gitignored, 600)
 credentials.txt       demo passwords (gitignored, 600, written by make users)
 requirements.txt      pinned deps
 Makefile              bootstrap / doctor / corpus / users / app
@@ -440,7 +566,8 @@ sql/
   05_dimensions.sql   PUT + COPY for the derived dimensions
   06_dimension_views.sql  register, facet, clause index and related-doc views
   07_audit.sql        ACCESS_LOG (one table, event-typed)
-  99_teardown.sql     drop database and warehouse
+  08_grants.sql       STREAMLITWEB_ROLE and its grants
+  99_teardown.sql     drop user, role, database and warehouse
 scripts/
   bootstrap.sh        venv + install + seed .env
   gen_keypair.sh      RSA key pair + ALTER USER statement
@@ -451,7 +578,9 @@ scripts/
   verify_load.py      assert counts, integrity and parse rates
   create_users.py     seed 3 lawyers + auditor + admin, write credentials.txt
   credentials.py      password generation and PBKDF2 hashing (shared)
-  sf.py               shared connection helper
+  create_service_user.py  STREAMLITWEB user + key pair + .env.service
+  verify_privileges.py    prove the service identity is least-privilege
+  sf.py               shared connection helper (env_file selectable)
 app/
   streamlit_app.py    login gate, role routing, index pages, document view
   auth.py             check_login + require_role
@@ -463,6 +592,8 @@ app/
 data/cuad/             downloaded source (gitignored)
 build/                generated NDJSON + manifest (gitignored)
 keys/                 private keys (gitignored, 700)
+  snowflake_key.p8      optional, for your own admin key-pair auth
+  streamlitweb_key.p8   the service identity's key
 ```
 
 # Notes
@@ -477,6 +608,13 @@ keys/                 private keys (gitignored, 700)
   two views is the correct shape.
 - CUAD data is CC BY 4.0, from The Atticus Project. Clause spans are expert
   annotations, not model output. This is a demo, not legal advice.
+- The service identity is a normal user with key-pair auth and no password.
+  `TYPE = SERVICE` is the stricter variant if your account allows it and you
+  want interactive login forbidden outright - worth verifying before relying
+  on it.
+- `.env.service` is generated, so do not edit it by hand: re-run
+  `make service-user` after rotating the key (`--force`) or changing the
+  account.
 - `sf.py` pins the Snowflake session to `TIMEZONE = 'UTC'` so `CREATED_AT` and
   `ACCESS_LOG.EVENT_TS` are comparable with UTC report cutoffs instead of
   inheriting the account's default session timezone.

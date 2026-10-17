@@ -1,4 +1,4 @@
-"""Shared Snowflake connection helper (reads .env, no config.toml)."""
+"""Shared Snowflake connection helper (reads an env file, no config.toml)."""
 from __future__ import annotations
 
 import os
@@ -8,13 +8,18 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Used when neither the env file nor an override names a warehouse.
+FALLBACK_WAREHOUSE = "CUAD_WH"
 
-def connect(**overrides):
-    """Open a connection using values from .env.
 
-    Any keyword override (database, schema, warehouse, role) wins over .env.
+def connect(env_file: str = ".env", **overrides):
+    """Open a connection using values from env_file (default .env).
+
+    Any keyword override (database, schema, warehouse, role, autocommit) wins
+    over the env file. Pass env_file=".env.service" to connect as the
+    least-privilege STREAMLITWEB service identity.
     """
-    load_dotenv(ROOT / ".env", override=True)
+    load_dotenv(ROOT / env_file, override=True)
 
     authenticator = os.getenv("SNOWFLAKE_AUTHENTICATOR", "SNOWFLAKE")
     params: dict = {
@@ -50,6 +55,8 @@ def connect(**overrides):
 
     params = {k: v for k, v in params.items() if v is not None}
     params.update({k: v for k, v in overrides.items() if v is not None})
+    if not params.get("warehouse"):
+        params["warehouse"] = FALLBACK_WAREHOUSE
     params = {k: v for k, v in params.items() if v is not None}
 
     import snowflake.connector as sf

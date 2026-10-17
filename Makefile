@@ -16,7 +16,8 @@ RENDERED_DIM := build/05_dimensions.rendered.sql
 .DEFAULT_GOAL := help
 
 .PHONY: help bootstrap keypair check-env doctor download build setup load views \
-        verify pipeline users app sql query teardown clean-stage clean
+        verify grants service-user verify-privileges pipeline users app sql query \
+        teardown clean-stage clean
 
 PORT ?= 8501
 
@@ -35,8 +36,12 @@ help: ## Show available targets
 	@echo "    setup        Create warehouse, database, schema, tables, stage"
 	@echo "    load         Upload NDJSON and COPY INTO all eight tables"
 	@echo "    views        Create register, facet, clause index, related-doc views"
+	@echo "    grants       Apply STREAMLITWEB_ROLE (least privilege; re-run after DDL)"
+	@echo "    service-user Create the STREAMLITWEB service user, key pair, .env.service"
 	@echo "    verify       Assert counts and referential integrity"
-	@echo "    pipeline     download -> build -> setup -> load -> views -> verify"
+	@echo "    verify-privileges  Assert the service identity is least-privilege"
+	@echo "    pipeline     download -> build -> setup -> load -> views -> grants"
+	@echo "                 -> service-user -> verify"
 	@echo
 	@echo "  3. Application"
 	@echo "    users        Create the three demo logins, write credentials.txt"
@@ -94,12 +99,23 @@ views: ## Create the register, facet, clause index, related-doc views and audit 
 verify: ## Assert row counts and referential integrity
 	$(PY) scripts/verify_load.py
 
-pipeline: ## Run the whole corpus load end to end
+grants: ## Apply the STREAMLITWEB_ROLE grants (safe to re-run)
+	@$(MAKE) --no-print-directory sql FILE=sql/08_grants.sql
+
+service-user: ## Create the STREAMLITWEB service user, key pair and .env.service
+	$(PY) scripts/create_service_user.py
+
+verify-privileges: ## Assert the service identity can do only what it should
+	$(PY) scripts/verify_privileges.py
+
+pipeline: ## Run the whole corpus load end to end, then provision the service identity
 	@$(MAKE) --no-print-directory download
 	@$(MAKE) --no-print-directory build
 	@$(MAKE) --no-print-directory setup
 	@$(MAKE) --no-print-directory load
 	@$(MAKE) --no-print-directory views
+	@$(MAKE) --no-print-directory grants
+	@$(MAKE) --no-print-directory service-user
 	@$(MAKE) --no-print-directory verify
 
 # --- 3. Application ----------------------------------------------------------
