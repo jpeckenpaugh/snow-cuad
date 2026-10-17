@@ -15,7 +15,7 @@ RENDERED_DIM := build/05_dimensions.rendered.sql
 
 .PHONY: help bootstrap keypair check-env doctor download build setup load views \
         verify grants service-user verify-privileges pipeline users app sql query \
-        teardown clean-stage clean
+        demo-video teardown clean-stage clean
 
 PORT ?= 8501
 
@@ -44,6 +44,9 @@ help: ## Show available targets
 	@echo "  3. Application"
 	@echo "    users        Create the three demo logins, write credentials.txt"
 	@echo "    app          Run the Streamlit search UI (PORT=8501)"
+	@echo
+	@echo "  4. Demo asset"
+	@echo "    demo-video   Build build/demo/demo-720p.mp4 (Playwright in Docker)"
 	@echo
 	@echo "  4. Utilities"
 	@echo "    sql          Run a SQL file:  make sql FILE=sql/00_setup.sql"
@@ -142,6 +145,22 @@ clean-stage: ## Remove uploaded load files from the stage
 
 teardown: ## Drop the database and warehouse
 	@$(MAKE) --no-print-directory sql FILE=sql/99_teardown.sql
+
+DEMO_IMAGE := cuad-demo-builder
+DEMO_DIR   := build/demo
+
+demo-video: ## Build the 720p side-by-side demo video (needs Docker + credentials.txt)
+	@command -v docker >/dev/null || { echo "error: docker not found"; exit 1; }
+	@test -f .env || { echo "error: .env not found; run make bootstrap"; exit 1; }
+	@test -f credentials.txt || { echo "error: credentials.txt not found; run make users"; exit 1; }
+	@mkdir -p $(DEMO_DIR)
+	docker build -q -t $(DEMO_IMAGE) demo
+	docker run --rm --init \
+	  -v "$(CURDIR):/workspace" \
+	  -v "$(CURDIR)/$(DEMO_DIR):/artifacts" \
+	  $(DEMO_IMAGE)
+	@echo
+	@ls -lh $(DEMO_DIR)/demo-720p.mp4
 
 clean: ## Remove .venv and build output
 	rm -rf .venv build

@@ -594,6 +594,80 @@ reset the credit counter on every run, so the quota could never trip.
 
 ---
 
+# 6. Demo video
+
+```bash
+make demo-video        # -> build/demo/demo-720p.mp4
+```
+
+Builds a side-by-side walkthrough: two browser sessions, four users, one
+recording, downscaled to 1280x720.
+
+Everything runs inside the Playwright container. It starts **two Streamlit
+instances** on 8501/8502, serves a synthetic showcase page with both in iframes,
+drives the storyline, records, then downscales with ffmpeg.
+
+```
+demo/Dockerfile      playwright/python image + ffmpeg + the app's runtime
+demo/runner.py       the beat machine
+build/demo/          outputs (gitignored)
+```
+
+## Why it is built this way
+
+**One page, one recording.** Both sessions are iframes inside a single
+1280x720... 2560x1440 page, so there is exactly one video. There is no
+compositing step and the two panes cannot drift apart. The alternative - two
+browser contexts, two recordings, `ffmpeg hstack` - needs beat-level
+re-synchronisation because each recording starts and stops independently.
+
+**Recorded at 1440p, delivered at 720p.** Each pane gets ~1270px of real layout
+width, so the app renders comfortably and click coordinates stay accurate.
+
+**Never use CSS `zoom` to fit the app into a narrow pane.** Chromium reports
+element boxes unzoomed, so Playwright computes click coordinates wrong by the
+zoom factor.
+
+## Outputs
+
+| File | What |
+|---|---|
+| `demo-720p.mp4` | 1280x720 h264, the deliverable |
+| `demo.webm` | raw 2560x1440 recording |
+| `gallery/*.png` | a still at each beat |
+| `FAIL.txt`, `FAIL-*.png` | written only when a beat fails |
+| `streamlit-*.log` | app logs |
+
+## Two things it does that you should know about
+
+- **It clears `ACCESS_LOG` first**, so the auditor's report narrates only what
+  the video did rather than accumulated history. That needs `ACCOUNTADMIN`, so
+  it uses `.env`, not the service identity.
+- **It reads `credentials.txt` at runtime.** Passwords rotate on every rebuild,
+  so hardcoded ones would silently break. Passwords render masked in the UI, so
+  they do not leak into the video.
+
+## A Streamlit gotcha worth remembering
+
+`get_by_role("button", name="Open")` matches **substring** by default, and
+Streamlit's facet dropdowns in the sidebar carry `aria-label="Open"`. They also
+come first in DOM order, so an unscoped lookup resolves to a dropdown toggle
+and the click silently opens a multiselect instead of a document - no error,
+just a beat that never advances. The runner scopes to
+`[data-testid="stMain"]`.
+
+Also: `st.dataframe` renders to canvas, so table rows are not in the DOM and
+cannot be clicked by text. The storyline opens documents through the clause
+search results, whose `Open` buttons are real buttons.
+
+## Tuning
+
+`TARGET_SECONDS` pads the recording to a duration; the runner takes ~48s of
+storyline as scripted. Edit the beats at the bottom of `demo/runner.py` - each
+`beats.banner(...)` is also the narration shown in the header.
+
+---
+
 # Layout
 
 ```
@@ -631,6 +705,9 @@ scripts/
   snow.sh             snow wrapper: load .env, resolve auth, exec
   verify_privileges.py    prove the service identity is least-privilege
   sf.py               shared connection helper (env_file selectable)
+demo/
+  Dockerfile          playwright/python image + ffmpeg + app runtime
+  runner.py           builds the side-by-side demo video
 app/
   streamlit_app.py    login gate, role routing, index pages, document view
   auth.py             check_login + require_role
@@ -640,7 +717,7 @@ app/
   queries.py          every corpus query the UI runs
   db.py               cached connection + query helpers
 data/cuad/             downloaded source (gitignored)
-build/                generated NDJSON + manifest (gitignored)
+build/                generated NDJSON + manifest + demo video (gitignored)
 keys/                 private keys (gitignored, 700)
   snowflake_key.p8      optional, for your own admin key-pair auth
   streamlitweb_key.p8   the service identity's key
