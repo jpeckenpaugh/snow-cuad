@@ -24,6 +24,10 @@ def connect(**overrides):
         "authenticator": authenticator,
         "login_timeout": 20,
         "client_session_keep_alive": False,
+        # Pin the session to UTC so CREATED_AT and ACCESS_LOG.EVENT_TS are
+        # comparable with UTC cutoffs, instead of inheriting the account's
+        # default session timezone.
+        "session_parameters": {"TIMEZONE": "UTC"},
     }
 
     for key in ("database", "schema", "warehouse"):

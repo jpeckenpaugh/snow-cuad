@@ -2,9 +2,13 @@
 
 Run with: make app
 
-Navigation lives in the URL. Four index pages (Contracts, Clauses, Types,
-Parties) all drill into the same filtered register, and every contract has a
-detail page with related documents.
+Navigation lives in the URL. Index pages all drill into one filtered register,
+and every contract has a detail page with related documents. Role decides
+which pages exist for you:
+
+  lawyer   Contracts / Clauses / Types / Parties
+  auditor  Reports
+  admin    everything
 
 `rev` in the query string is a counter bumped on real navigation: facet
 widgets key off it so they re-initialise from the URL when you arrive from an
@@ -13,18 +17,23 @@ index page, but keep their state while you are using them.
 Raw HTML is emitted with st.html, never st.markdown: contract text contains
 blank lines, and those terminate Markdown's HTML block, which would dump the
 rest of the snippet as literal tags.
+
+Audit writes happen at three chokepoints only — auth.check_login and logout,
+the search form, and page_document/reports. See app/audit.py.
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
 import html
 import re
 
 import streamlit as st
 
+import admin
+import audit
+import auth
 import db
 import queries
+import reports
 
 st.set_page_config(page_title="CUAD Corpus", page_icon="§", layout="wide")
 
@@ -154,26 +163,7 @@ def small_line(label: str, value: str) -> str:
     return f'<span class="small">{html.escape(label)}</span><br>{value}'
 
 
-# --- auth --------------------------------------------------------------------
-
-def check_login(username: str, password: str) -> dict | None:
-    try:
-        rows = db.q(
-            "SELECT DISPLAY_NAME, SALT, PWD_HASH, ITERATIONS FROM APP_USERS WHERE USERNAME = %s",
-            (username,),
-        )
-    except RuntimeError:
-        return None
-    if not rows:
-        return None
-    display_name, salt_hex, digest_hex, iterations = rows[0]
-    computed = hashlib.pbkdf2_hmac(
-        "sha256", password.encode(), bytes.fromhex(salt_hex), int(iterations)
-    ).hex()
-    if hmac.compare_digest(computed, digest_hex):
-        return {"username": username, "display_name": display_name}
-    return None
-
+# --- login -------------------------------------------------------------------
 
 def login_screen() -> None:
     st.html(CSS)
@@ -186,7 +176,7 @@ def login_screen() -> None:
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
         if submitted:
-            user = check_login(username.strip(), password)
+            user = auth.check_login(username.strip().lower(), password)
             if user:
                 st.session_state.user = user
                 st.rerun()
@@ -198,35 +188,54 @@ def login_screen() -> None:
         )
 
 
-# --- sidebar -----------------------------------------------------------------
+# --- navigation --------------------------------------------------------------
 
 NAV = [
-    ("contracts", "Contracts"),
-    ("clauses", "Clauses"),
-    ("types", "Types"),
-    ("parties", "Parties"),
+    ("contracts", "Contracts", ("lawyer", "admin")),
+    ("clauses", "Clauses", ("lawyer", "admin")),
+    ("types", "Types", ("lawyer", "admin")),
+    ("parties", "Parties", ("lawyer", "admin")),
+    ("reports", "Reports", ("auditor", "admin")),
+    ("admin", "Admin", ("admin",)),
 ]
 
+DEFAULT_PAGE = {"lawyer": "contracts", "auditor": "reports", "admin": "contracts"}
 
-def sidebar(page: str, term: str | None) -> None:
+
+def allowed_pages(role: str) -> set[str]:
+    return {key for key, _label, roles in NAV if role in roles}
+
+
+def sidebar(page: str, term: str | None, role: str) -> None:
     user = st.session_state.user
     with st.sidebar:
         st.markdown(f"**{user['display_name']}**")
         st.caption(f"`{user['username']}`")
+        chips([role])
         if st.button("Sign out", width="stretch"):
+            audit.log("LOGOUT")
             st.session_state.clear()
             st.query_params.clear()
             st.rerun()
 
-        st.divider()
-        with st.form("search", clear_on_submit=False):
-            typed = st.text_input("Search", value=term or "", placeholder="title, counterparty, clause")
-            if st.form_submit_button("Search", width="stretch"):
-                nav(nav="contracts", q=typed.strip() or None, doc=None)
+        # Only the corpus pages need a search box.
+        if "contracts" in allowed_pages(role):
+            st.divider()
+            with st.form("search", clear_on_submit=False):
+                typed = st.text_input(
+                    "Search", value=term or "", placeholder="title, counterparty, clause"
+                )
+                if st.form_submit_button("Search", width="stretch"):
+                    query = typed.strip()
+                    if query:
+                        audit.log("SEARCH", detail=query)
+                    nav(nav="contracts", q=query or None, doc=None)
 
         st.divider()
         st.html('<span class="small">BROWSE</span>')
-        for key, label in NAV:
+        for key, label, roles in NAV:
+            if role not in roles:
+                continue
             if st.button(
                 label,
                 key=f"nav-{key}",
@@ -300,7 +309,7 @@ def facet_controls(selected_clauses, doc_type, jurisdiction, decade, party) -> N
                 nav(clause=None, type=None, jur=None, decade=None, party=None)
 
 
-# --- pages -------------------------------------------------------------------
+# --- corpus pages ------------------------------------------------------------
 
 def page_contracts() -> None:
     term = param("q")
@@ -328,42 +337,44 @@ def page_contracts() -> None:
     active += [f"search: {term}"] if term else []
     chips(active)
 
-    if not rows:
-        st.info("Nothing matches those filters.")
-        return
+    if rows:
+        table = [
+            {
+                "Title": row[1],
+                "Type": row[2],
+                "Year": str(row[3]) if row[3] is not None else "—",
+                "Jurisdiction": row[4],
+                "Counterparties": (row[5] or "")[:90],
+                "Clauses": f"{row[6]}/41",
+            }
+            for row in rows
+        ]
+        ids = [row[0] for row in rows]
 
-    table = [
-        {
-            "Title": row[1],
-            "Type": row[2],
-            "Year": str(row[3]) if row[3] is not None else "—",
-            "Jurisdiction": row[4],
-            "Counterparties": (row[5] or "")[:90],
-            "Clauses": f"{row[6]}/41",
-        }
-        for row in rows
-    ]
-    ids = [row[0] for row in rows]
+        event = st.dataframe(
+            table,
+            width="stretch",
+            hide_index=True,
+            height=520,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="tbl-contracts",
+            column_config={
+                "Title": st.column_config.TextColumn(width=280),
+                "Type": st.column_config.TextColumn(width=170),
+                "Year": st.column_config.TextColumn(width=60),
+                "Jurisdiction": st.column_config.TextColumn(width=120),
+                "Counterparties": st.column_config.TextColumn(width=170),
+                "Clauses": st.column_config.TextColumn(width=70),
+            },
+        )
+        if event.selection.rows:
+            nav(doc=ids[event.selection.rows[0]], nav="document")
+    else:
+        st.info("No contract titles or counterparties match those filters.")
 
-    event = st.dataframe(
-        table,
-        hide_index=True,
-        height=520,
-        on_select="rerun",
-        selection_mode="single-row",
-        key="tbl-contracts",
-        column_config={
-            "Title": st.column_config.TextColumn(width=280),
-            "Type": st.column_config.TextColumn(width=170),
-            "Year": st.column_config.TextColumn(width=60),
-            "Jurisdiction": st.column_config.TextColumn(width=120),
-            "Counterparties": st.column_config.TextColumn(width=170),
-            "Clauses": st.column_config.TextColumn(width=70),
-        },
-    )
-    if event.selection.rows:
-        nav(doc=ids[event.selection.rows[0]], nav="document")
-
+    # Clause-text matches are shown even when no title matched: a term like
+    # "indemnification" appears in clause bodies and in no title at all.
     if term:
         st.divider()
         st.markdown(f"#### Clause text matches for “{term}”")
@@ -467,6 +478,7 @@ def page_parties() -> None:
 
 
 def page_document() -> None:
+    auth.require_role("lawyer", "admin")
     doc_id = param("doc")
     if not doc_id:
         st.info("No document selected.")
@@ -476,6 +488,12 @@ def page_document() -> None:
     if not meta:
         st.error(f"No such contract: {doc_id}")
         return
+
+    # Streamlit re-runs the script on every interaction, so without this guard
+    # one open document would produce dozens of DOCUMENT_VIEW rows.
+    if st.session_state.get("last_doc") != doc_id:
+        st.session_state.last_doc = doc_id
+        audit.log("DOCUMENT_VIEW", doc_id=doc_id)
 
     if st.button("← Back to contracts"):
         nav(nav="contracts", doc=None)
@@ -562,19 +580,54 @@ def page_document() -> None:
 
 # --- main --------------------------------------------------------------------
 
+def _refresh_user() -> bool:
+    """Re-read role and status so a suspension takes effect on the next rerun."""
+    username = st.session_state.user["username"]
+    rows = db.q(
+        "SELECT DISPLAY_NAME, APP_ROLE, STATUS FROM APP_USERS WHERE USERNAME = %s",
+        (username,),
+    )
+    if not rows or rows[0][2] != "active":
+        return False
+    st.session_state.user["display_name"] = rows[0][0]
+    st.session_state.user["role"] = rows[0][1]
+    return True
+
+
 def main() -> None:
     if "user" not in st.session_state:
         login_screen()
         return
 
-    st.html(CSS)
-    page = param("nav", "contracts")
-    term = param("q")
+    if not _refresh_user():
+        # Log once, then drop the session. The account may have been suspended.
+        audit.log(
+            "SESSION_REVOKED",
+            actor=st.session_state.user["username"],
+            detail="account not active",
+        )
+        st.session_state.clear()
+        st.query_params.clear()
+        st.warning("Your session has ended because the account is no longer active.")
+        login_screen()
+        return
 
-    sidebar(page, term)
+    st.html(CSS)
+    role = st.session_state.user["role"]
+    allowed = allowed_pages(role)
+
+    page = param("nav") or DEFAULT_PAGE.get(role, "contracts")
+    if page != "document" and page not in allowed:
+        page = DEFAULT_PAGE.get(role, "contracts")
+
+    sidebar(page, param("q"), role)
 
     if page == "document":
         page_document()
+    elif page == "reports":
+        reports.page_reports()
+    elif page == "admin":
+        admin.page_admin()
     elif page == "clauses":
         page_clauses()
     elif page == "types":

@@ -40,6 +40,26 @@ def q(sql: str, params: tuple = ()) -> list[tuple]:
     raise RuntimeError(f"query failed: {last}") from last
 
 
+def execute(sql: str, params: tuple = ()) -> int:
+    """Run a DML statement and return the affected row count.
+
+    The connector autocommits, so no explicit commit is needed.
+    """
+    last: Exception | None = None
+    for attempt in (0, 1):
+        try:
+            cur = _connection().cursor()
+            try:
+                cur.execute(sql, params)
+                return cur.rowcount
+            finally:
+                cur.close()
+        except Exception as exc:  # noqa: BLE001 - retry once, then surface
+            last = exc
+            _connection.clear()
+    raise RuntimeError(f"statement failed: {last}") from last
+
+
 @st.cache_data(show_spinner=False)
 def categories() -> list[str]:
     return [row[0] for row in q("SELECT CATEGORY FROM CLAUSE_CATEGORIES ORDER BY CATEGORY")]

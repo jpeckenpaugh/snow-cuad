@@ -9,7 +9,7 @@ See <https://www.atticusprojectai.org/cuad>.
 
 ## Current status
 
-**Step 4 of N complete: derived dimensions and a browsable UI.**
+**Step 5 of N complete: roles, admin console and access auditing.**
 
 - [x] Python 3.14 virtualenv
 - [x] Snowflake CLI + Python connector in `.venv`
@@ -21,6 +21,8 @@ See <https://www.atticusprojectai.org/cuad>.
 - [x] Streamlit app
 - [x] Derived dimensions (type, year, jurisdiction, counterparty)
 - [x] Browse by clause / type / jurisdiction / counterparty + related documents
+- [x] Roles: lawyer / auditor / admin
+- [x] Admin console (create, suspend, reset) and an access audit log
 
 ---
 
@@ -136,10 +138,11 @@ Or step by step:
 |---|---|---|
 | `make download` | Fetch `CUADv1.json` + `category_descriptions.csv` into `data/cuad/` | 510 contracts, 13,823 spans, 41 categories |
 | `make build` | Write the 8 NDJSON load files + both manifests | 510 / 510 / 13,823 / 41 and the dimensions |
-| `make setup` | Create `CUAD_WH`, `CUAD_DB.CORPUS`, 9 tables, stage | objects created |
+| `make setup` | Create `CUAD_WH`, `CUAD_DB.CORPUS`, the tables, stage, `APP_USERS` | objects created |
 | `make load` | `PUT` + `COPY INTO` all eight data tables | 8x `LOADED`, 0 errors |
-| `make views` | Create the register, facet, clause index and related-doc views | 9 views created |
-| `make verify` | Assert counts, integrity and parse rates | `all checks passed` |
+| `make views` | Create the corpus views and `ACCESS_LOG` | views + log created |
+| `make verify` | Assert counts, integrity, roles and parse rates | `all checks passed` |
+| `make users` | Seed 3 lawyers + 1 auditor + 1 admin, write `credentials.txt` | 5 logins |
 
 `make download` and `make build` need no Snowflake access. `make verify`
 exits non-zero on any mismatch, so it works as a gate.
@@ -155,7 +158,8 @@ CUAD_DB.CORPUS
 │                                 (CLAUSE_ID, DOC_ID, CATEGORY, QUESTION,
 │                                  ANSWER_TEXT, ANSWER_START, ANSWER_END)
 ├── CLAUSE_CATEGORIES         41  (CATEGORY, DESCRIPTION, ANSWER_FORMAT, GRP)
-├── APP_USERS                  3  demo logins (PBKDF2 hashes only)
+├── APP_USERS                  5  logins: role + status + PBKDF2 hash only
+├── ACCESS_LOG                    every login, search, document view and admin action
   -- derived by scripts/build_dimensions.py ----------------------------------
 ├── CONTRACT_DIM             510  DOC_TYPE, AGREEMENT_YEAR, JURISDICTION, CLAUSE_COUNT
 ├── CONTRACT_PARTY           915  parsed counterparties
@@ -223,11 +227,13 @@ make users          # create lawyer-001..003, write credentials.txt
 FORCE=1 make users  # rotate all three passwords
 ```
 
-| Username | Name |
-|---|---|
-| `lawyer-001` | Ada Whitfield |
-| `lawyer-002` | Marcus Iyer |
-| `lawyer-003` | Noor Castellanos |
+| Username | Name | Role |
+|---|---|---|
+| `lawyer-001` | Ada Whitfield | lawyer |
+| `lawyer-002` | Marcus Iyer | lawyer |
+| `lawyer-003` | Noor Castellanos | lawyer |
+| `admin` | Sasha Lindqvist | admin |
+| `auditor` | Tomas Beck | auditor |
 
 - Passwords are 16 random characters, printed to the terminal once and
   written to `credentials.txt` (mode `600`, gitignored).
@@ -310,7 +316,107 @@ stated` and stay selectable facets.
 
 No semantic or vector search, no relevance ranking, no summarisation, no PDF
 rendering (CUAD ships text, not PDFs), no clients or matters (CUAD has none),
-and no per-user access control — all three lawyers see the whole corpus.
+and no per-document scoping — every lawyer sees the whole corpus. Roles
+control which *pages* you get, not which contracts.
+
+---
+
+# 4. Roles, admin and audit
+
+## Roles
+
+One `APP_ROLE` column on `APP_USERS`, three values, no roles table:
+
+| Role | Pages |
+|---|---|
+| `lawyer` | Contracts / Clauses / Types / Parties |
+| `auditor` | Reports only |
+| `admin` | everything, plus Admin |
+
+The sidebar only renders pages your role reaches, and every privileged page
+calls `auth.require_role(...)` as a backstop for direct URL access. An auditor
+who pastes `?nav=contracts` gets "Not authorised" rather than the register.
+
+`APP_ROLE` is named that way on purpose: a column literally called `ROLE` is
+fine in `CREATE TABLE` but Snowflake rejects it in `ALTER TABLE ... ADD
+COLUMN`. A related trap, documented in `sql/04_users.sql`: `ADD COLUMN IF NOT
+EXISTS ... NOT NULL DEFAULT` fails with "ambiguous column name" when the
+column already exists, so the upgrade path uses plain `ADD COLUMN IF NOT
+EXISTS` plus an explicit backfill.
+
+## Admin console
+
+Three actions, all audited:
+
+- **Create user** — username, display name, role. The password is generated
+  once and shown once; it is never written anywhere.
+- **Suspend / reactivate** — a status change, never a delete, so `ACCESS_LOG`
+  rows keep resolving. It takes effect on the target's next rerun, and
+  `SUSPENDED_AT` / `SUSPENDED_BY` record who did it.
+- **Reset password** — new salt and hash, new password shown once.
+
+You cannot suspend your own account: last-admin lockout is unrecoverable
+through the UI.
+
+## Access reporting
+
+The auditor and admin get four reports over a date range, each with a CSV
+download:
+
+| Report | Shows |
+|---|---|
+| Logins | per username: events, successes, failures, last success |
+| Logins | recent failed attempts, with attempted username and reason |
+| Searches | most frequent terms, number of users, last search |
+| Documents | most accessed contracts, viewers, last view |
+| Activity | every event in the range |
+
+Generating a report writes a `REPORT_RUN` event: an auditor auditing
+themselves is the correct behaviour.
+
+## The audit log
+
+One table, `ACCESS_LOG`, discriminated by `EVENT_TYPE`, rather than a table per
+event. Nullable columns are deliberate: `ACTOR_ROLE` is null when there is no
+session, `DOC_ID` only applies to `DOCUMENT_VIEW`, and `DETAIL` carries a
+search term or an admin action's target.
+
+```
+LOGIN_SUCCESS  LOGIN_FAILURE  LOGOUT  SESSION_REVOKED
+SEARCH         DOCUMENT_VIEW  REPORT_RUN
+USER_CREATED   USER_SUSPENDED USER_REACTIVATED PASSWORD_RESET
+```
+
+Writes happen at four chokepoints only: `auth.check_login` and the sign-out
+button, the search form (once per submitted search, not per keystroke), the
+document page, and the admin actions.
+
+Two details that matter:
+
+- **Streamlit re-runs the script on every interaction.** `page_document()`
+  compares the open `doc_id` against `st.session_state.last_doc` before
+  logging; without that guard, one viewed contract produces dozens of rows.
+  Report generation uses the same pattern.
+- **Passwords are never recorded.** A failed login stores the attempted
+  username verbatim but truncated to 64 characters — useful forensics, and the
+  only field a mistyped password could ever land in.
+
+### Trust boundary
+
+There are no aggregation views: every report is date filtered, so aggregation
+lives in `app/reports.py` where the cutoff is a parameter. Query `ACCESS_LOG`
+directly for ad-hoc analysis:
+
+```sql
+SELECT ACTOR, COUNT_IF(EVENT_TYPE = 'LOGIN_FAILURE') AS FAILURES
+FROM ACCESS_LOG GROUP BY ACTOR ORDER BY FAILURES DESC;
+```
+
+Everything runs on one service role, so this log records what the
+*application* did. It is not tamper-proof against anyone holding that role's
+credentials, and it cannot audit lawyers the way Snowflake's own
+`LOGIN_HISTORY` / `ACCESS_HISTORY` would: from Snowflake's point of view, all
+five logins are the same user.
 
 ---
 
@@ -330,9 +436,10 @@ sql/
   01_tables.sql       nine tables, file format, stage
   02_load.sql         PUT + COPY for the corpus (rendered with the build path)
   03_views.sql        document register + category status
-  04_users.sql        APP_USERS (app logins, not Snowflake users)
+  04_users.sql        APP_USERS: roles, status, credentials (app logins)
   05_dimensions.sql   PUT + COPY for the derived dimensions
   06_dimension_views.sql  register, facet, clause index and related-doc views
+  07_audit.sql        ACCESS_LOG (one table, event-typed)
   99_teardown.sql     drop database and warehouse
 scripts/
   bootstrap.sh        venv + install + seed .env
@@ -342,12 +449,17 @@ scripts/
   build_load_files.py CUADv1.json -> NDJSON
   build_dimensions.py clause text -> type, year, jurisdiction, counterparties, related
   verify_load.py      assert counts, integrity and parse rates
-  create_users.py     three demo logins + credentials.txt
+  create_users.py     seed 3 lawyers + auditor + admin, write credentials.txt
+  credentials.py      password generation and PBKDF2 hashing (shared)
   sf.py               shared connection helper
 app/
-  streamlit_app.py    login gate, four index pages, document view, related docs
-  queries.py          every query the UI runs
-  db.py               cached connection + query helper
+  streamlit_app.py    login gate, role routing, index pages, document view
+  auth.py             check_login + require_role
+  admin.py            users table, create / suspend / reset
+  reports.py          four access reports with CSV export
+  audit.py            the single audit write path
+  queries.py          every corpus query the UI runs
+  db.py               cached connection + query helpers
 data/cuad/             downloaded source (gitignored)
 build/                generated NDJSON + manifest (gitignored)
 keys/                 private keys (gitignored, 700)
@@ -365,3 +477,9 @@ keys/                 private keys (gitignored, 700)
   two views is the correct shape.
 - CUAD data is CC BY 4.0, from The Atticus Project. Clause spans are expert
   annotations, not model output. This is a demo, not legal advice.
+- `sf.py` pins the Snowflake session to `TIMEZONE = 'UTC'` so `CREATED_AT` and
+  `ACCESS_LOG.EVENT_TS` are comparable with UTC report cutoffs instead of
+  inheriting the account's default session timezone.
+- Audit logging never breaks the app: a failed insert is reported to stderr and
+  swallowed, because an audit table that can block a login is worse than a
+  missing row.

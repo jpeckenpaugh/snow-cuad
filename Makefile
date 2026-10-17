@@ -72,9 +72,10 @@ build: ## Build NDJSON load files and navigation dimensions
 	$(PY) scripts/build_load_files.py
 	$(PY) scripts/build_dimensions.py
 
-setup: ## Create warehouse, database, schema, tables, stage
+setup: ## Create warehouse, database, schema, tables, stage, users, audit log
 	@$(MAKE) --no-print-directory sql FILE=sql/00_setup.sql
 	@$(MAKE) --no-print-directory sql FILE=sql/01_tables.sql
+	@$(MAKE) --no-print-directory sql FILE=sql/04_users.sql
 
 load: ## Upload and COPY INTO all eight tables
 	@test -f build/manifest.json || { echo "error: build/manifest.json missing; run 'make build'"; exit 1; }
@@ -85,9 +86,10 @@ load: ## Upload and COPY INTO all eight tables
 	@sed 's|__BUILD_DIR__|$(CURDIR)/build|g' sql/05_dimensions.sql > $(RENDERED_DIM)
 	@$(SQL_ENV) -f $(RENDERED_DIM)
 
-views: ## Create the register, facet, clause index and related-doc views
+views: ## Create the register, facet, clause index, related-doc views and audit log
 	@$(MAKE) --no-print-directory sql FILE=sql/03_views.sql
 	@$(MAKE) --no-print-directory sql FILE=sql/06_dimension_views.sql
+	@$(MAKE) --no-print-directory sql FILE=sql/07_audit.sql
 
 verify: ## Assert row counts and referential integrity
 	$(PY) scripts/verify_load.py
@@ -102,7 +104,7 @@ pipeline: ## Run the whole corpus load end to end
 
 # --- 3. Application ----------------------------------------------------------
 
-users: ## Create the three demo logins (FORCE=1 to rotate passwords)
+users: ## Seed the demo logins (FORCE=1 to rotate passwords)
 	@$(MAKE) --no-print-directory sql FILE=sql/04_users.sql
 	$(PY) scripts/create_users.py $(if $(FORCE),--force,)
 

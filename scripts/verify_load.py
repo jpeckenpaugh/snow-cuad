@@ -129,6 +129,36 @@ CHECKS = [
         "(SELECT 1 FROM RELATED_DOC r WHERE r.DOC_ID = c.DOC_ID)) <= 20, 0, 1)",
         0,
     ),
+    # --- users, roles and audit ----------------------------------------------
+    (
+        "user roles outside the allowed set",
+        "SELECT COUNT(*) FROM APP_USERS WHERE APP_ROLE NOT IN ('lawyer', 'auditor', 'admin')",
+        0,
+    ),
+    (
+        "user statuses outside the allowed set",
+        "SELECT COUNT(*) FROM APP_USERS WHERE STATUS NOT IN ('active', 'suspended')",
+        0,
+    ),
+    (
+        "active admins != 1 (skipped while no users are seeded)",
+        "SELECT IFF((SELECT COUNT(*) FROM APP_USERS) = 0, 0, "
+        "IFF((SELECT COUNT(*) FROM APP_USERS WHERE APP_ROLE = 'admin' AND STATUS = 'active') = 1, 0, 1))",
+        0,
+    ),
+    (
+        "audit event types outside the known set",
+        "SELECT COUNT(*) FROM ACCESS_LOG WHERE EVENT_TYPE NOT IN ("
+        "'LOGIN_SUCCESS','LOGIN_FAILURE','LOGOUT','SESSION_REVOKED','SEARCH',"
+        "'DOCUMENT_VIEW','REPORT_RUN','USER_CREATED','USER_SUSPENDED',"
+        "'USER_REACTIVATED','PASSWORD_RESET')",
+        0,
+    ),
+    (
+        "suspended users without a suspension timestamp",
+        "SELECT COUNT(*) FROM APP_USERS WHERE STATUS = 'suspended' AND SUSPENDED_AT IS NULL",
+        0,
+    ),
 ]
 
 
@@ -179,6 +209,11 @@ def main() -> int:
         if docs_with_clauses != 510:
             failures.append(f"distinct contracts with clauses: expected 510, got {docs_with_clauses}")
 
+        cur.execute("SELECT COUNT(*) FROM APP_USERS")
+        user_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM ACCESS_LOG")
+        audit_count = cur.fetchone()[0]
+
     width_a = max(len(r[0]) for r in rows) + 2
     print(f"{'check':<{width_a}} {'want':>8} {'got':>8}  result")
     print("-" * (width_a + 28))
@@ -192,7 +227,8 @@ def main() -> int:
         return 1
 
     total = rates["documents"]
-    print("\nparse rates (build-time, informational)")
+    print(f"\nusers seeded: {user_count} · audit events recorded: {audit_count}")
+    print("parse rates (build-time, informational)")
     for label, key in (
         ("type classified", "type_classified"),
         ("year parsed", "year_parsed"),
