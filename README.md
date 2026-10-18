@@ -3,9 +3,14 @@
 A working proof of concept: the **CUAD** contract corpus loaded into Snowflake,
 with a lawyer-facing search UI, role-based access, and an access audit log.
 
-![Two sessions searching the corpus side by side](docs/assets/hero.gif)
+[![Two sessions searching the corpus side by side](docs/assets/hero.gif)](https://snow-cuad.livive.net/docs/assets/demo-720p.mp4)
 
-*Full walkthrough — [demo-720p.mp4](docs/assets/demo-720p.mp4) (~50s, 1280×720)*
+*[Full walkthrough](https://snow-cuad.livive.net/docs/assets/demo-720p.mp4) — 1280×720*
+
+<!-- The video is linked by absolute URL rather than committed-relative: GitHub's
+     blob viewer refuses to preview it ("we can't show files that are this big")
+     and GitHub strips <video> tags from READMEs, so a Pages-hosted copy is the
+     only way to get a link that actually plays. -->
 
 ---
 

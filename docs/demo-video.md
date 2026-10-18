@@ -8,8 +8,20 @@ A side-by-side walkthrough: two browser sessions, four users, one recording,
 downscaled to 1280×720. The runner is `demo/runner.py`; it runs entirely inside
 the Playwright container, which also carries the app's runtime.
 
-The committed copy is [`docs/assets/demo-720p.mp4`](../../docs/assets/demo-720p.mp4),
-with a still per beat in `docs/assets/`.
+The rendered copy is at
+<https://snow-cuad.livive.net/docs/assets/demo-720p.mp4>, with a still per beat in `docs/assets/`.
+
+The mp4 is committed to the repo, but **link to it by absolute URL rather than
+by repo path**:
+
+- GitHub's blob viewer refuses to preview it — *"we can't show files that are
+  this big right now"*
+- GitHub strips `<video>` and `<iframe>` from READMEs, so there is no way to get
+  a player inline unless the file is uploaded through the GitHub editor as an
+  issue attachment (stored on GitHub's CDN rather than in the repo)
+
+GitHub Pages serves the same file with `Content-Type: video/mp4`, and the
+browser plays it. Hence `snow-cuad.livive.net`.
 
 ## The storyline
 
