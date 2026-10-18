@@ -157,20 +157,49 @@ def related(doc_id: str) -> list[tuple]:
     )
 
 
-def clause_matches(term: str, categories: list[str] | None = None, limit: int = 60) -> list[tuple]:
+def _clause_match_where(term: str, categories: list[str] | None) -> tuple[str, list]:
     where = ["cl.ANSWER_TEXT ILIKE %s"]
     params: list = [f"%{term}%"]
     if categories:
         where.append("cl.CATEGORY IN (" + ",".join(["%s"] * len(categories)) + ")")
         params += categories
+    return " AND ".join(where), params
+
+
+def clause_matches(
+    term: str,
+    categories: list[str] | None = None,
+    limit: int = 60,
+    offset: int = 0,
+) -> list[tuple]:
+    where, params = _clause_match_where(term, categories)
     return db.q(
         f"""
         SELECT cl.DOC_ID, c.TITLE, cl.CATEGORY, cl.ANSWER_TEXT
         FROM CLAUSES cl
         JOIN CONTRACTS c ON c.DOC_ID = cl.DOC_ID
-        WHERE {' AND '.join(where)}
+        WHERE {where}
         ORDER BY c.TITLE, cl.ANSWER_START
-        LIMIT {int(limit)}
+        LIMIT {int(limit)} OFFSET {int(offset)}
         """,
         tuple(params),
     )
+
+
+def clause_match_count(term: str, categories: list[str] | None = None) -> int:
+    """Total spans matching the term, so the UI can show a denominator.
+
+    A term like `agreement` matches thousands of spans; without this the hit
+    list silently stopped at one page and read as if that were the whole answer.
+    """
+    where, params = _clause_match_where(term, categories)
+    rows = db.q(
+        f"""
+        SELECT COUNT(*)
+        FROM CLAUSES cl
+        JOIN CONTRACTS c ON c.DOC_ID = cl.DOC_ID
+        WHERE {where}
+        """,
+        tuple(params),
+    )
+    return rows[0][0] if rows else 0

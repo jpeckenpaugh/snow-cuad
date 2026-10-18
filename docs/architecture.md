@@ -67,8 +67,9 @@ regression is visible.
 ### Counterparties are the weak axis
 
 CUAD's party field mixes entity names with role labels (`Licensor`, `Party A`,
-`INDIVIDUALLY`). After suffix-aware splitting and a role stoplist: **915 parsed
-names, of which 885 occur exactly once and only 29 repeat.**
+`INDIVIDUALLY`). After suffix-aware splitting and a role stoplist: **915 party
+mentions across 881 distinct names. 854 of those names appear exactly once and
+only 27 appear in more than one contract.**
 
 That is why the Parties page lists only names appearing in two or more
 contracts, and why counterparty contributes to just 71 of the 2,430

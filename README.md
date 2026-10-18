@@ -44,7 +44,8 @@ A starting point, not a finished application — deliberately simple:
 - **No PDFs.** CUAD ships text, not documents.
 - **Single tenant.** No clients, matters or per-matter isolation.
 - **The counterparty dimension is noisy.** CUAD's party field is free text that
-  mixes entity names with role labels, so only 29 names repeat. See
+  mixes entity names with role labels, so only 27 names appear in more than one
+  contract. See
   [architecture](docs/architecture.md#counterparties-are-the-weak-axis).
 
 ## Screenshots
@@ -148,6 +149,8 @@ docs/                 detail and design notes
 | [architecture.md](docs/architecture.md) | data model, derived dimensions, parse rates, related-document scoring, UI navigation |
 | [security.md](docs/security.md) | the three auth layers, the grants, key-pair auth, privilege verification, trust boundary |
 | [operations.md](docs/operations.md) | **the playbook** — every `make` target, teardown and rebuild, troubleshooting |
+| [testing-summary.md](docs/testing-summary.md) | reviewer comments, determinations, and what was fixed — with [feedback/](docs/feedback/) and [fixes.md](docs/fixes.md) |
+| [fixes.md](docs/fixes.md) | the nine issues found in tester feedback, what changed, and what was deliberately left alone |
 | [demo-video.md](docs/demo-video.md) | how the demo video is built, and why it needs no compositing |
 | [build-notes.md](docs/build-notes.md) | the sharp edges — Snowflake and Streamlit behaviour that cost time |
 

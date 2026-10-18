@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
+import html
+
 import streamlit as st
 
 import audit
@@ -30,6 +32,47 @@ def _users() -> list[tuple]:
         FROM APP_USERS u
         ORDER BY u.APP_ROLE, u.USERNAME
         """
+    )
+
+
+_USERS_CSS = """
+<style>
+table.users { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+table.users th, table.users td {
+  text-align: left; padding: 6px 10px;
+  border-bottom: 1px solid rgba(128,128,128,0.25);
+}
+table.users th { font-weight: 600; color: rgba(128,128,128,1); }
+table.users td { vertical-align: top; }
+</style>
+"""
+
+
+def _users_table(rows: list[tuple]) -> None:
+    """The user list as a plain HTML table.
+
+    It was an `st.dataframe` canvas grid. Canvas grids have a minimum width
+    that cannot shrink, so the Last login column fell off the right edge in a
+    narrow window; the cell text was also unselectable and absent from the
+    accessibility tree until focused. Six rows need none of that: a real table
+    wraps and stays readable at any width. See docs/fixes.md.
+    """
+    columns = ("Username", "Name", "Role", "Status", "Created (UTC)", "Last login (UTC)")
+    head = "".join(f"<th>{html.escape(name)}</th>" for name in columns)
+    body = []
+    for row in rows:
+        cells = [
+            row[0], row[1], row[2], row[3],
+            str(row[4])[:19],
+            str(row[5])[:19] if row[5] else "—",
+        ]
+        body.append(
+            "<tr>" + "".join(f"<td>{html.escape(str(cell))}</td>" for cell in cells) + "</tr>"
+        )
+    st.html(_USERS_CSS)
+    st.html(
+        f"<table class='users'><thead><tr>{head}</tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table>"
     )
 
 
@@ -102,40 +145,17 @@ def _reset_password(target: str) -> None:
 
 
 def page_admin() -> None:
-    require_role("admin")
+    require_role("admin", page="admin")
     me = current_user()["username"]
 
     st.subheader("Users")
     _flash_new_password()
 
     rows = _users()
-    table = [
-        {
-            "Username": row[0],
-            "Name": row[1],
-            "Role": row[2],
-            "Status": row[3],
-            "Created (UTC)": str(row[4])[:19],
-            "Last login (UTC)": str(row[5])[:19] if row[5] else "—",
-        }
-        for row in rows
-    ]
-    st.dataframe(
-        table,
-        width="stretch",
-        hide_index=True,
-        height=250,
-        column_config={
-            "Username": st.column_config.TextColumn(width=110),
-            "Name": st.column_config.TextColumn(width=150),
-            "Role": st.column_config.TextColumn(width=80),
-            "Status": st.column_config.TextColumn(width=90),
-            "Created (UTC)": st.column_config.TextColumn(width=150),
-            "Last login (UTC)": st.column_config.TextColumn(width=150),
-        },
-    )
+    _users_table(rows)
     st.caption(
-        "Suspended accounts keep their row and their audit history; only login is blocked."
+        "Times are UTC. Suspended accounts keep their row and their audit history; "
+        "only login is blocked."
     )
 
     st.markdown("#### Create user")
@@ -153,19 +173,26 @@ def page_admin() -> None:
         st.caption("No other accounts to manage.")
         return
 
-    labels = [f"{row[0]} · {row[1]} · {row[2]} · {row[3]}" for row in manageable]
-    pick = st.selectbox("Account", range(len(labels)), format_func=lambda i: labels[i])
-    target = manageable[pick]
-
-    col_status, col_password = st.columns(2)
-    if target[3] == "active":
-        if col_status.button(f"Suspend {target[0]}", width="stretch"):
-            _set_status(target[0], True)
-    else:
-        if col_status.button(f"Reactivate {target[0]}", type="primary", width="stretch"):
-            _set_status(target[0], False)
-
-    if col_password.button(f"Reset password for {target[0]}", width="stretch"):
-        _reset_password(target[0])
+    # One row of actions per account, rather than "pick one from a dropdown,
+    # then click one button". The picker was the problem: any action reruns the
+    # script, and the selectbox could come back on a different account, so the
+    # next click landed on the wrong user. Per-row buttons cannot drift, and
+    # they remove the re-selection cost the reviewers complained about.
+    for username, name, role, status, _created, _last_login in manageable:
+        row = st.columns([4, 1, 1.4], vertical_alignment="center")
+        row[0].html(
+            f"<b>{html.escape(username)}</b> &nbsp; "
+            f'<span class="small">{html.escape(name)} · {html.escape(role)} · '
+            f"{html.escape(status)}</span>"
+        )
+        if status == "active":
+            if row[1].button("Suspend", key=f"admin-suspend-{username}", width="stretch"):
+                _set_status(username, True)
+        else:
+            if row[1].button("Reactivate", key=f"admin-reactivate-{username}",
+                             type="primary", width="stretch"):
+                _set_status(username, False)
+        if row[2].button("Reset password", key=f"admin-reset-{username}", width="stretch"):
+            _reset_password(username)
 
     st.caption("You cannot suspend your own account.")

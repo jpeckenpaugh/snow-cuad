@@ -72,8 +72,14 @@ def check_login(username: str, password: str) -> dict | None:
     return {"username": username, "display_name": display_name, "role": role}
 
 
-def require_role(*allowed: str) -> None:
-    """Backstop for direct URL access; the sidebar already hides other pages."""
+def require_role(*allowed: str, page: str | None = None) -> None:
+    """Backstop for direct URL access; the sidebar already hides other pages.
+
+    A denied attempt is logged. Probing a page you are not entitled to is
+    exactly the kind of event a reviewer wants to see, and it previously left
+    no trace at all.
+    """
     if current_user().get("role") not in allowed:
+        audit.log("ACCESS_DENIED", detail=f"page={page or 'unknown'}")
         st.error("Not authorised for this page.")
         st.stop()

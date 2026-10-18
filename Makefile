@@ -14,10 +14,11 @@ RENDERED_DIM := build/05_dimensions.rendered.sql
 .DEFAULT_GOAL := help
 
 .PHONY: help bootstrap keypair check-env doctor download build setup load views \
-        verify grants service-user verify-privileges pipeline users app sql query \
-        demo-video teardown clean-stage clean
+        verify grants service-user verify-privileges pipeline users app verify-ui \
+        sql query demo-video teardown clean-stage clean
 
 PORT ?= 8501
+VERIFY_URL ?= http://localhost:8501
 
 help: ## Show available targets
 	@echo "Usage: make <target>"
@@ -44,6 +45,8 @@ help: ## Show available targets
 	@echo "  3. Application"
 	@echo "    users        Create the three demo logins, write credentials.txt"
 	@echo "    app          Run the Streamlit search UI (PORT=8501)"
+	@echo "    verify-ui    Browser-check the fixed behaviours against a running app"
+	@echo "                 (VERIFY_URL=http://localhost:8501; needs Playwright)"
 	@echo
 	@echo "  4. Demo asset"
 	@echo "    demo-video   Build build/demo/demo-720p.mp4 (Playwright in Docker)"
@@ -161,6 +164,17 @@ demo-video: ## Build the 720p side-by-side demo video (needs Docker + credential
 	  $(DEMO_IMAGE)
 	@echo
 	@ls -lh $(DEMO_DIR)/demo-720p.mp4
+
+verify-ui: ## Browser-check the fixed behaviours against a running app (needs Playwright)
+	@test -x $(PY) || { echo "error: run 'make bootstrap' first"; exit 1; }
+	@$(PY) -c "import playwright" 2>/dev/null || { \
+	  echo "error: playwright is not installed in .venv"; \
+	  echo "  $(PY) -m pip install playwright && $(PY) -m playwright install chromium"; \
+	  echo "  or run tests/verify_ui.py inside the demo image (see its docstring)"; \
+	  exit 1; }
+	@curl -fsS -o /dev/null $(VERIFY_URL)/healthz 2>/dev/null || { \
+	  echo "error: no app responding at $(VERIFY_URL); start 'make app' first"; exit 1; }
+	$(PY) tests/verify_ui.py --url $(VERIFY_URL)
 
 clean: ## Remove .venv and build output
 	rm -rf .venv build

@@ -6,6 +6,7 @@ from exactly three chokepoints:
   * check_login() / logout        -> LOGIN_*, LOGOUT, SESSION_REVOKED
   * nav() / the search form       -> SEARCH
   * page_document() / reports     -> DOCUMENT_VIEW, REPORT_RUN
+  * require_role()                -> ACCESS_DENIED
   * app/admin.py                  -> USER_CREATED, USER_SUSPENDED, ...
 
 Logging must never take the app down, so failures are reported to stderr and
@@ -28,6 +29,7 @@ EVENT_TYPES = (
     "LOGIN_FAILURE",
     "LOGOUT",
     "SESSION_REVOKED",
+    "ACCESS_DENIED",
     "SEARCH",
     "DOCUMENT_VIEW",
     "REPORT_RUN",

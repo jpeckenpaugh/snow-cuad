@@ -8,7 +8,7 @@
 --
 -- Known event types:
 --   LOGIN_SUCCESS  LOGIN_FAILURE  LOGOUT  SESSION_REVOKED
---   SEARCH         DOCUMENT_VIEW  REPORT_RUN
+--   ACCESS_DENIED  SEARCH         DOCUMENT_VIEW  REPORT_RUN
 --   USER_CREATED   USER_SUSPENDED USER_REACTIVATED PASSWORD_RESET
 --
 -- There are deliberately no aggregation views here: every report is date
@@ -16,6 +16,11 @@
 -- be parameterised. Query ACCESS_LOG directly for ad-hoc analysis, e.g.
 --   SELECT ACTOR, COUNT_IF(EVENT_TYPE='LOGIN_FAILURE') AS FAILURES
 --   FROM ACCESS_LOG GROUP BY ACTOR ORDER BY FAILURES DESC;
+--
+-- Order by EVENT_TS, not EVENT_ID. EVENT_ID is an AUTOINCREMENT, and with
+-- concurrent writers it is not monotonic against the clock: a handful of rows
+-- sort in the opposite order to their timestamp, so `ORDER BY EVENT_ID DESC`
+-- quietly misleads.
 --
 -- Writes go through the same service role the app uses, so this log is
 -- application-level and not tamper-proof: it records what the app did, not

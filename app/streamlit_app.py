@@ -18,8 +18,14 @@ Raw HTML is emitted with st.html, never st.markdown: contract text contains
 blank lines, and those terminate Markdown's HTML block, which would dump the
 rest of the snippet as literal tags.
 
-Audit writes happen at three chokepoints only — auth.check_login and logout,
-the search form, and page_document/reports. See app/audit.py.
+Audit writes happen at four chokepoints — auth.check_login and logout, the
+search form, page_document/reports, and a denied page request (see
+auth.require_role). See app/audit.py.
+
+Clause-text search is paged (CLAUSE_PAGE results at a time, with a total) and
+the register pairs its grid with an explicit Open button, because a bare
+Streamlit row selection only responds to a row's leading selection cell. See
+docs/fixes.md.
 """
 from __future__ import annotations
 
@@ -40,6 +46,10 @@ st.set_page_config(page_title="CUAD Corpus", page_icon="§", layout="wide")
 MAX_RENDER = 200_000
 CONTEXT = 260
 ANY = "Any"
+# Clause-text search is paged rather than capped: the old fixed limit of 60 made
+# `agreement` (5,565 spans) look like a 60-row answer with no hint that it was
+# truncated. See docs/fixes.md.
+CLAUSE_PAGE = 60
 
 CSS = """
 <style>
@@ -83,6 +93,14 @@ def param_list(name: str) -> list[str]:
 
 def rev() -> str:
     return st.query_params.get("rev") or "0"
+
+
+def int_param(name: str, default: int) -> int:
+    """Read an integer query param without trusting its contents."""
+    try:
+        return int(st.query_params.get(name) or default)
+    except (TypeError, ValueError):
+        return default
 
 
 def _write(current: dict) -> None:
@@ -163,7 +181,70 @@ def small_line(label: str, value: str) -> str:
     return f'<span class="small">{html.escape(label)}</span><br>{value}'
 
 
+def plural(count: int, singular: str, plural_form: str | None = None) -> str:
+    """`1 contract` / `2 contracts`."""
+    return singular if count == 1 else (plural_form or singular + "s")
+
+
+def row_picker(
+    table: list[dict],
+    *,
+    key: str,
+    action: str,
+    hint: str,
+    column_config: dict | None = None,
+    height: int = 520,
+) -> tuple[int | None, bool]:
+    """A single-select table paired with an explicit action button.
+
+    Streamlit's row selection only fires from a row's leading selection cell —
+    a click on the row body does nothing — so an `on_select` table with no
+    other affordance looks inert, and a stray click on that small cell used to
+    navigate away immediately. Pairing the table with a labelled button makes
+    the action discoverable and deliberate. Returns (selected_index, clicked).
+    """
+    event = st.dataframe(
+        table,
+        width="stretch",
+        hide_index=True,
+        height=height,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=key,
+        column_config=column_config,
+    )
+    selected = list(event.selection.rows)
+    ready = bool(selected)
+    cols = st.columns([1, 6], vertical_alignment="center")
+    clicked = cols[0].button(
+        action, type="primary", disabled=not ready, key=f"{key}-action"
+    )
+    if ready:
+        first = next(iter(table[selected[0]].values()))
+        label = f"Selected: {str(first)[:90]}"
+    else:
+        label = hint
+    cols[1].caption(label)
+    return (selected[0] if ready else None), clicked
+
+
 # --- login -------------------------------------------------------------------
+
+def pending_target() -> str | None:
+    """Describe the page a link was pointing at, for the login screen.
+
+    Navigation lives in the query string, so a deep link keeps its destination
+    across the sign-in that a full page reload forces. This says so out loud
+    instead of silently dumping the user on the default page.
+    """
+    doc = st.query_params.get("doc")
+    if doc:
+        return f"that contract (`{doc}`)"
+    target = st.query_params.get("nav")
+    if target and target != "document":
+        return f"the {target} page"
+    return None
+
 
 def login_screen() -> None:
     st.html(CSS)
@@ -171,6 +252,12 @@ def login_screen() -> None:
     with mid:
         st.markdown("## CUAD Contract Review")
         st.caption("510 commercial contracts · 41 clause categories · demo corpus")
+        target = pending_target()
+        if target:
+            st.info(
+                f"Sign in to continue to {target}. This demo keeps sign-in in the "
+                "browser session, so a page reload asks for your password again."
+            )
         with st.form("login"):
             username = st.text_input("Username", placeholder="lawyer-001")
             password = st.text_input("Password", type="password")
@@ -244,7 +331,8 @@ def sidebar(page: str, term: str | None, role: str) -> None:
                     query = typed.strip()
                     if query:
                         audit.log("SEARCH", detail=query)
-                    nav(nav="contracts", q=query or None, doc=None)
+                    # A new term starts at page 1 of the clause hits.
+                    nav(nav="contracts", q=query or None, doc=None, cpage=None)
 
         st.divider()
         st.html('<span class="small">BROWSE</span>')
@@ -342,17 +430,20 @@ def page_contracts() -> None:
         party=party,
         term=term,
     )
+    # Count clause matches up front: it decides the header wording below, so the
+    # page never says "0 contracts" while showing clause hits underneath it.
+    hits_total = queries.clause_match_count(term, selected_clauses or None) if term else 0
 
-    st.subheader(f"{len(rows)} contracts")
     active = [f"clause: {c}" for c in selected_clauses]
     active += [f"type: {doc_type}"] if doc_type else []
     active += [f"jurisdiction: {jurisdiction}"] if jurisdiction else []
     active += [f"decade: {decade}"] if decade else []
     active += [f"counterparty: {party}"] if party else []
     active += [f"search: {term}"] if term else []
-    chips(active)
 
     if rows:
+        st.subheader(f"{len(rows)} {plural(len(rows), 'contract')}")
+        chips(active)
         table = [
             {
                 "Title": row[1],
@@ -365,15 +456,11 @@ def page_contracts() -> None:
             for row in rows
         ]
         ids = [row[0] for row in rows]
-
-        event = st.dataframe(
+        index, clicked = row_picker(
             table,
-            width="stretch",
-            hide_index=True,
-            height=520,
-            on_select="rerun",
-            selection_mode="single-row",
             key="tbl-contracts",
+            action="Open",
+            hint="Select a row, then press Open.",
             column_config={
                 "Title": st.column_config.TextColumn(width=280),
                 "Type": st.column_config.TextColumn(width=170),
@@ -383,19 +470,39 @@ def page_contracts() -> None:
                 "Clauses": st.column_config.TextColumn(width=70),
             },
         )
-        if event.selection.rows:
-            nav(doc=ids[event.selection.rows[0]], nav="document")
+        if clicked and index is not None:
+            nav(doc=ids[index], nav="document")
     else:
-        st.info("No contract titles or counterparties match those filters.")
+        chips(active)
+        if term and hits_total:
+            # The page has results, just not title/counterparty ones. Saying
+            # "0 contracts" here used to read as a failed search.
+            st.info(
+                f"No contract title or counterparty matches “{term}”. "
+                f"{hits_total} {plural(hits_total, 'clause-text match', 'clause-text matches')} "
+                "are shown below."
+            )
+        else:
+            st.info("No contract titles or counterparties match those filters.")
 
     # Clause-text matches are shown even when no title matched: a term like
     # "indemnification" appears in clause bodies and in no title at all.
     if term:
         st.divider()
         st.markdown(f"#### Clause text matches for “{term}”")
-        hits = queries.clause_matches(term, selected_clauses or None)
-        if not hits:
+        if not hits_total:
             st.caption("No clause answers contain that term.")
+            return
+        last_page = max(1, -(-hits_total // CLAUSE_PAGE))
+        page_no = min(max(1, int_param("cpage", 1)), last_page)
+        offset = (page_no - 1) * CLAUSE_PAGE
+        hits = queries.clause_matches(
+            term, selected_clauses or None, limit=CLAUSE_PAGE, offset=offset
+        )
+        shown_to = offset + len(hits)
+        st.caption(
+            f"Showing {offset + 1}–{shown_to} of {hits_total} matching clause spans."
+        )
         for index, (doc_id, title, category, answer) in enumerate(hits):
             with st.container(border=True):
                 cols = st.columns([5, 1])
@@ -403,9 +510,26 @@ def page_contracts() -> None:
                 cols[0].html(f'<span class="small">{html.escape(category)}</span>')
                 # index, not doc_id+category: one contract can have several
                 # spans for the same category, which would collide.
-                if cols[1].button("Open", key=f"hit-{index}", width="stretch"):
+                if cols[1].button("Open", key=f"hit-{offset + index}", width="stretch"):
                     nav(doc=doc_id, nav="document")
                 st.html(f'<div class="snippet">{highlight(answer, term)}</div>')
+        if last_page > 1:
+            prev_col, mid_col, next_col = st.columns([1, 2, 1], vertical_alignment="center")
+            if page_no > 1:
+                prev_col.button(
+                    f"← Previous {CLAUSE_PAGE}",
+                    width="stretch",
+                    on_click=nav_soft,
+                    kwargs={"cpage": str(page_no - 1)},
+                )
+            mid_col.caption(f"page {page_no} of {last_page}")
+            if page_no < last_page:
+                next_col.button(
+                    f"Next {CLAUSE_PAGE} →",
+                    width="stretch",
+                    on_click=nav_soft,
+                    kwargs={"cpage": str(page_no + 1)},
+                )
 
 
 def page_clauses() -> None:
@@ -419,14 +543,12 @@ def page_clauses() -> None:
          "Description": row[4]}
         for row in index
     ]
-    event = st.dataframe(
+    pick, clicked = row_picker(
         table,
-        width="stretch",
-        hide_index=True,
-        height=620,
-        on_select="rerun",
-        selection_mode="single-row",
         key="tbl-clauses",
+        action="Filter register",
+        hint="Select a clause category, then filter the register.",
+        height=620,
         column_config={
             "Clause": st.column_config.TextColumn(width=250),
             "Contracts": st.column_config.NumberColumn(width=90),
@@ -435,8 +557,8 @@ def page_clauses() -> None:
             "Description": st.column_config.TextColumn(width=420),
         },
     )
-    if event.selection.rows:
-        nav(nav="contracts", clause=index[event.selection.rows[0]][0])
+    if clicked and pick is not None:
+        nav(nav="contracts", clause=index[pick][0])
 
 
 def page_types() -> None:
@@ -449,21 +571,19 @@ def page_types() -> None:
         "could be parsed. Select a row to filter the register."
     )
     table = [{"Agreement type": row[0], "Contracts": row[1]} for row in index]
-    event = st.dataframe(
+    pick, clicked = row_picker(
         table,
-        width="stretch",
-        hide_index=True,
-        height=620,
-        on_select="rerun",
-        selection_mode="single-row",
         key="tbl-types",
+        action="Filter register",
+        hint="Select an agreement type, then filter the register.",
+        height=620,
         column_config={
             "Agreement type": st.column_config.TextColumn(width=340),
             "Contracts": st.column_config.NumberColumn(width=100),
         },
     )
-    if event.selection.rows:
-        nav(nav="contracts", type=index[event.selection.rows[0]][0])
+    if clicked and pick is not None:
+        nav(nav="contracts", type=index[pick][0])
 
 
 def page_parties() -> None:
@@ -477,25 +597,23 @@ def page_parties() -> None:
         "filter on Contracts to search all of them. Select a row to filter the register."
     )
     table = [{"Counterparty": row[0], "Contracts": row[1]} for row in index]
-    event = st.dataframe(
+    pick, clicked = row_picker(
         table,
-        width="stretch",
-        hide_index=True,
-        height=620,
-        on_select="rerun",
-        selection_mode="single-row",
         key="tbl-parties",
+        action="Filter register",
+        hint="Select a counterparty, then filter the register.",
+        height=620,
         column_config={
             "Counterparty": st.column_config.TextColumn(width=340),
             "Contracts": st.column_config.NumberColumn(width=100),
         },
     )
-    if event.selection.rows:
-        nav(nav="contracts", party=index[event.selection.rows[0]][0])
+    if clicked and pick is not None:
+        nav(nav="contracts", party=index[pick][0])
 
 
 def page_document() -> None:
-    auth.require_role("lawyer", "admin")
+    auth.require_role("lawyer", "admin", page="document")
     doc_id = param("doc")
     if not doc_id:
         st.info("No document selected.")
@@ -635,6 +753,11 @@ def main() -> None:
 
     page = param("nav") or DEFAULT_PAGE.get(role, "contracts")
     if page != "document" and page not in allowed:
+        # An explicit request for a page this role cannot have is a denial, and
+        # denials are worth recording. A bare visit with no ?nav= falls back to
+        # the role default and is not an attempt at anything.
+        if param("nav"):
+            audit.log("ACCESS_DENIED", detail=f"page={page}")
         page = DEFAULT_PAGE.get(role, "contracts")
 
     sidebar(page, param("q"), role)
